@@ -1,0 +1,19 @@
+# Level 2 靶机配置文件
+# 此文件用于展示静态配置，实际参数在 main.py 中定义
+
+model:
+  input_dim: 10
+  d_model: 64
+  hidden_dim: 128
+  num_layers: 3
+  dropout_rate: 0.3
+  activation: relu
+  output_dim: 2
+
+training:
+  batch_size: 64
+  learning_rate: 0.001
+  num_epochs: 20
+  weight_decay: 1e-5
+  optimizer: adam
+  momentum: 0.9

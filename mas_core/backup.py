@@ -1,6 +1,9 @@
 """
-NAS CLI Backup and Undo System
-备份和撤销系统
+NAS CLI Backup and Undo System (v1.3.1 Enhanced)
+备份和撤销系统 - 增强版
+- 支持备份描述
+- 备份列表展示
+- 快速切换备份
 """
 import os
 import shutil
@@ -54,14 +57,24 @@ class Operation:
             changes=changes,
             metadata=data.get('metadata', {})
         )
+    
+    @property
+    def formatted_time(self) -> str:
+        """格式化时间"""
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    
+    @property
+    def short_id(self) -> str:
+        """短 ID"""
+        return self.id[:8]
 
 
 class BackupManager:
-    """备份管理器"""
+    """备份管理器 - v1.3.1 增强版"""
     
     BACKUP_DIR_NAME = ".nas_backup"
     HISTORY_FILE = "history.json"
-    MAX_BACKUPS = 10  # 最大保留备份数量
+    MAX_BACKUPS = 20  # v1.3.1: 增加最大备份数量
     
     def __init__(self, project_path: str):
         self.project_path = Path(project_path)
@@ -104,10 +117,10 @@ class BackupManager:
     
     def create_backup(self, description: str = "", metadata: Optional[Dict] = None) -> Operation:
         """
-        创建项目备份
+        创建项目备份 - v1.3.1 增强版
         
         Args:
-            description: 备份描述
+            description: 备份描述（必填，用于识别备份内容）
             metadata: 额外元数据
             
         Returns:
@@ -116,10 +129,14 @@ class BackupManager:
         operation_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:12]
         timestamp = time.time()
         
+        # v1.3.1: 如果没有描述，自动生成一个
+        if not description:
+            description = f"Backup at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
         operation = Operation(
             id=operation_id,
             timestamp=timestamp,
-            description=description or f"Backup at {datetime.now().isoformat()}",
+            description=description,
             target_dir=str(self.project_path),
             metadata=metadata or {}
         )
@@ -166,6 +183,7 @@ class BackupManager:
         self._save_history()
         
         print(f"[BackupManager] Created backup: {operation_id}")
+        print(f"[BackupManager] Description: {description}")
         print(f"[BackupManager] Backed up {len(operation.changes)} files")
         
         return operation
@@ -285,6 +303,71 @@ class BackupManager:
         """获取指定操作"""
         return next((op for op in self._operations if op.id == operation_id), None)
     
+    def list_backups_with_info(self) -> List[Dict[str, Any]]:
+        """
+        v1.3.1: 列出所有备份及其详细信息
+        
+        Returns:
+            List[Dict]: 备份信息列表
+        """
+        backups = []
+        for op in self._operations:
+            info = {
+                'id': op.id,
+                'short_id': op.short_id,
+                'timestamp': op.timestamp,
+                'formatted_time': op.formatted_time,
+                'description': op.description,
+                'file_count': len(op.changes),
+                'target_dir': op.target_dir,
+                'metadata': op.metadata,
+                'undone': op.metadata.get('undone', False)
+            }
+            backups.append(info)
+        return backups
+    
+    def display_backup_list(self):
+        """
+        v1.3.1: 显示备份列表（用于 CLI 展示）
+        """
+        backups = self.list_backups_with_info()
+        
+        if not backups:
+            print("\n[BackupManager] 没有找到任何备份")
+            return
+        
+        print("\n" + "=" * 80)
+        print(f"{'ID':<10} {'时间':<20} {'文件数':<8} {'描述':<30} {'状态'}")
+        print("=" * 80)
+        
+        for i, backup in enumerate(backups, 1):
+            status = "已撤销" if backup['undone'] else "可用"
+            desc = backup['description'][:28] + ".." if len(backup['description']) > 30 else backup['description']
+            print(f"{backup['short_id']:<10} {backup['formatted_time']:<20} "
+                  f"{backup['file_count']:<8} {desc:<30} {status}")
+        
+        print("=" * 80)
+        print(f"共 {len(backups)} 个备份")
+    
+    def switch_to_backup(self, operation_id: str) -> bool:
+        """
+        v1.3.1: 切换到指定备份（先备份当前状态，再恢复指定版本）
+        
+        Args:
+            operation_id: 目标备份 ID
+            
+        Returns:
+            bool: 是否成功
+        """
+        # 先备份当前状态
+        current_backup = self.create_backup(
+            description=f"Auto-backup before switching to {operation_id[:8]}"
+        )
+        print(f"[BackupManager] 已自动备份当前状态: {current_backup.short_id}")
+        
+        # 然后恢复到指定备份
+        return self.restore_backup(operation_id)
+    
     def _cleanup_old_backups(self):
         """清理旧备份"""
         if len(self._operations) <= self.MAX_BACKUPS:
@@ -324,6 +407,7 @@ class BackupManager:
             return False
         
         print(f"[BackupManager] Restoring to backup: {operation_id}")
+        print(f"[BackupManager] Description: {operation.description}")
         
         success_count = 0
         fail_count = 0
@@ -372,4 +456,35 @@ class BackupManager:
             if current_hash != change.original_hash:
                 return False
         
+        return True
+    
+    def delete_backup(self, operation_id: str) -> bool:
+        """
+        v1.3.1: 删除指定备份
+        
+        Args:
+            operation_id: 备份操作ID
+            
+        Returns:
+            bool: 是否成功
+        """
+        operation = self.get_operation(operation_id)
+        if not operation:
+            print(f"[BackupManager] Operation not found: {operation_id}")
+            return False
+        
+        # 删除备份目录
+        backup_subdir = self.backup_dir / operation_id
+        if backup_subdir.exists():
+            try:
+                shutil.rmtree(backup_subdir)
+            except Exception as e:
+                print(f"[BackupManager] Failed to delete backup directory: {e}")
+                return False
+        
+        # 从历史记录中移除
+        self._operations = [op for op in self._operations if op.id != operation_id]
+        self._save_history()
+        
+        print(f"[BackupManager] Deleted backup: {operation_id}")
         return True

@@ -1,6 +1,7 @@
 """
-NAS CLI Configuration System
-配置文件管理系统
+NAS CLI Configuration System (v1.3.1 Enhanced)
+配置文件管理系统 - 增强版
+- 添加代理配置支持
 """
 import os
 import yaml
@@ -8,6 +9,27 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field, asdict
+
+
+@dataclass
+class ProxyConfig:
+    """v1.3.1: 代理配置"""
+    http_proxy: str = ""
+    https_proxy: str = ""
+    
+    def validate(self) -> List[str]:
+        """验证配置，返回错误列表"""
+        errors = []
+        # 代理配置是可选的，不需要强制验证
+        return errors
+    
+    @classmethod
+    def from_env(cls) -> 'ProxyConfig':
+        """从环境变量创建代理配置"""
+        return cls(
+            http_proxy=os.environ.get('http_proxy', '') or os.environ.get('HTTP_PROXY', ''),
+            https_proxy=os.environ.get('https_proxy', '') or os.environ.get('HTTPS_PROXY', '')
+        )
 
 
 @dataclass
@@ -80,16 +102,17 @@ class NASConfig:
 
 @dataclass
 class Config:
-    """完整配置"""
+    """完整配置 - v1.3.1"""
     llm: LLMConfig = field(default_factory=LLMConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     nas: NASConfig = field(default_factory=NASConfig)
-    version: str = "1.3.0"
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)  # v1.3.1: 新增代理配置
+    version: str = "1.3.1"
 
 
 class ConfigManager:
-    """配置管理器"""
+    """配置管理器 - v1.3.1 增强版"""
     
     DEFAULT_CONFIG_DIR = Path.home() / ".nas-cli"
     DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.yaml"
@@ -152,6 +175,12 @@ class ConfigManager:
                 if hasattr(base.nas, key):
                     setattr(base.nas, key, value)
         
+        # v1.3.1: 合并代理配置
+        if 'proxy' in updates:
+            for key, value in updates['proxy'].items():
+                if hasattr(base.proxy, key):
+                    setattr(base.proxy, key, value)
+        
         return base
     
     def _load_from_env(self, config: Config) -> Config:
@@ -171,6 +200,15 @@ class ConfigManager:
             config.ui.verbose = os.getenv('NAS_CLI_VERBOSE').lower() in ('1', 'true', 'yes')
         if os.getenv('NAS_CLI_LANGUAGE'):
             config.ui.language = os.getenv('NAS_CLI_LANGUAGE')
+        
+        # v1.3.1: 代理配置（环境变量优先）
+        http_proxy = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
+        https_proxy = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
+        
+        if http_proxy:
+            config.proxy.http_proxy = http_proxy
+        if https_proxy:
+            config.proxy.https_proxy = https_proxy
         
         return config
     
@@ -208,6 +246,11 @@ class ConfigManager:
                 'nas': {
                     'value_keywords': config.nas.value_keywords,
                     'layer_keywords': config.nas.layer_keywords,
+                },
+                # v1.3.1: 代理配置
+                'proxy': {
+                    'http_proxy': config.proxy.http_proxy,
+                    'https_proxy': config.proxy.https_proxy,
                 }
             }
             

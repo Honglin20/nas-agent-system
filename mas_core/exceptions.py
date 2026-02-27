@@ -30,6 +30,8 @@ class ErrorCode(Enum):
     LLM_INVALID_RESPONSE = 204
     LLM_CONTEXT_TOO_LONG = 205
     LLM_ALL_MODELS_FAILED = 206
+    LLM_CONNECTION_ERROR = 207  # v1.3.1: 连接错误
+    LLM_AUTHENTICATION_ERROR = 208  # v1.3.1: 认证错误
     
     # 代码分析错误 (300-399)
     PARSE_ERROR = 300
@@ -172,6 +174,8 @@ USER_FRIENDLY_MESSAGES = {
     ErrorCode.LLM_TIMEOUT: "LLM 调用超时，请稍后重试或增加超时时间。",
     ErrorCode.LLM_RATE_LIMIT: "API 调用频率超限，请稍后重试。",
     ErrorCode.LLM_ALL_MODELS_FAILED: "所有 LLM 模型都调用失败，请检查配置。",
+    ErrorCode.LLM_CONNECTION_ERROR: "无法连接到 LLM 服务，请检查网络连接或配置代理。",  # v1.3.1
+    ErrorCode.LLM_AUTHENTICATION_ERROR: "LLM API Key 验证失败，请检查 API Key 是否正确。",  # v1.3.1
     ErrorCode.PARSE_ERROR: "代码解析错误，请检查代码语法。",
     ErrorCode.MODIFICATION_FAILED: "代码修改失败，已自动回滚到修改前状态。",
     ErrorCode.INVALID_INPUT: "输入无效，请检查输入参数。",

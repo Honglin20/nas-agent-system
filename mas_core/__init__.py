@@ -1,5 +1,5 @@
 """
-MAS Core - Package Init (v1.3.0 Enhanced)
+MAS Core - Package Init (v1.3.1 Enhanced)
 """
 from .registry import CentralRegistry, ScopeInfo
 from .base_agent import BaseAgent
@@ -7,7 +7,7 @@ from .scope_agent import ScopeAgent
 from .cli_agent import CLIUIAgent
 from .modifier_agent import ModifierAgent
 from .orchestrator import NASOrchestrator
-from .llm_client import LLMClient, MockLLMClient, init_llm, get_llm_client, is_llm_available, BaseLLMClient
+from .llm_client import LLMClient, init_llm, get_llm_client, is_llm_available, BaseLLMClient
 
 # v1.2.0 新增模块
 from .model_discovery import (
@@ -30,7 +30,7 @@ from .search_space_expander import (
 # v1.3.0 新增模块
 from .config import (
     Config, ConfigManager, 
-    LLMConfig, UIConfig, AnalysisConfig, NASConfig,
+    LLMConfig, UIConfig, AnalysisConfig, NASConfig, ProxyConfig,
     get_config, load_config, config_manager
 )
 from .exceptions import (
@@ -46,7 +46,7 @@ from .backup import (
     BackupManager, Operation, FileChange
 )
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 __all__ = [
     # 基础组件
@@ -58,7 +58,6 @@ __all__ = [
     'ModifierAgent',
     'NASOrchestrator',
     'LLMClient',
-    'MockLLMClient',
     'BaseLLMClient',
     'init_llm',
     'get_llm_client',
@@ -81,6 +80,7 @@ __all__ = [
     'UIConfig',
     'AnalysisConfig',
     'NASConfig',
+    'ProxyConfig',
     'get_config',
     'load_config',
     'config_manager',

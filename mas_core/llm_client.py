@@ -1,5 +1,5 @@
 """
-MAS Core - LLM Integration (v1.3.0 Enhanced)
+MAS Core - LLM Integration (v1.3.1 Enhanced)
 增强版 LLM 客户端，支持：
 - 智能模型识别（解析动态反射）
 - 代码片段分析
@@ -7,6 +7,8 @@ MAS Core - LLM Integration (v1.3.0 Enhanced)
 - 寻优空间张开
 - 重试机制和超时控制
 - 响应缓存
+- 代理支持
+- 连接测试
 """
 import os
 import re
@@ -16,6 +18,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from abc import ABC, abstractmethod
 
 import openai
+import httpx
 
 from .exceptions import (
     LLMError, ErrorCode, 
@@ -45,100 +48,14 @@ class BaseLLMClient(ABC):
         pass
 
 
-class MockLLMClient(BaseLLMClient):
-    """Mock LLM 客户端，用于测试"""
-    
-    def analyze_code_for_nas(self, code: str, file_path: str = "") -> List[Dict[str, Any]]:
-        """模拟分析代码"""
-        # 简单的规则匹配
-        candidates = []
-        
-        # 查找常见的 NAS 参数模式
-        patterns = [
-            (r'(\w*[Ll]earning_[Rr]ate\w*|\w*lr\w*)\s*=\s*([0-9.]+)', 'learning_rate', 'value'),
-            (r'(\w*[Bb]atch_[Ss]ize\w*)\s*=\s*(\d+)', 'batch_size', 'value'),
-            (r'(\w*[Dd]ropout\w*)\s*=\s*([0-9.]+)', 'dropout', 'value'),
-            (r'(\w*[Nn]um_[Ll]ayers\w*)\s*=\s*(\d+)', 'num_layers', 'value'),
-            (r'(\w*[Hh]idden_[Dd]im\w*)\s*=\s*(\d+)', 'hidden_dim', 'value'),
-        ]
-        
-        for pattern, name, param_type in patterns:
-            matches = re.finditer(pattern, code)
-            for match in matches:
-                value = match.group(2)
-                try:
-                    value = float(value) if '.' in value else int(value)
-                except:
-                    pass
-                
-                candidates.append({
-                    'name': name,
-                    'type': param_type,
-                    'current_value': value,
-                    'suggested_space': f"ValueSpace([{value}])",
-                    'reason': f'Detected {name} parameter',
-                    'line': code[:match.start()].count('\n') + 1
-                })
-        
-        return candidates
-    
-    def generate_search_space(self, param_name: str, current_value: Any, 
-                              param_type: str) -> List[Any]:
-        """模拟生成搜索空间"""
-        if isinstance(current_value, (int, float)):
-            if 'lr' in param_name.lower():
-                return [current_value / 10, current_value, current_value * 10]
-            return [max(1, int(current_value / 2)), current_value, current_value * 2]
-        return [current_value]
-    
-    def recommend_injection(self, candidates: List[Dict]) -> List[Dict]:
-        """模拟推荐"""
-        return [
-            {
-                'name': c['name'],
-                'recommended': True,
-                'priority': 'medium',
-                'reason': 'Mock recommendation'
-            }
-            for c in candidates
-        ]
-    
-    def analyze_code_snippet_for_model_instantiation(self, code_snippet: str, 
-                                                      available_models: List[str]) -> Dict[str, Any]:
-        """模拟模型实例化分析"""
-        return {
-            "instantiated_model": available_models[0] if available_models else "Unknown",
-            "instantiation_line": 1,
-            "model_variable": "model",
-            "confidence": "low",
-            "reasoning": "Mock analysis"
-        }
-    
-    def find_training_function_and_metrics(self, code_snippet: str) -> Dict[str, Any]:
-        """模拟训练函数分析"""
-        return {
-            "training_function": "train",
-            "function_type": "function",
-            "metrics": {"loss": "loss", "accuracy": "acc"},
-            "model_variable": "model",
-            "insertion_point": "end of epoch"
-        }
-    
-    def analyze_conditional_layers(self, code_snippet: str) -> List[Dict[str, Any]]:
-        """模拟条件层分析"""
-        return []
-    
-    def resolve_dynamic_reference(self, code: str, variable_name: str) -> str:
-        """模拟动态引用解析"""
-        return f"Mock resolution for {variable_name}"
-
-
 class LLMClient(BaseLLMClient):
     """
-    增强版 LLM 客户端 - v1.3.0
+    增强版 LLM 客户端 - v1.3.1
     - 支持重试机制和超时控制
     - 支持熔断器模式
     - 更好的错误处理
+    - 代理支持
+    - 连接测试
     """
     
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
@@ -146,6 +63,25 @@ class LLMClient(BaseLLMClient):
         
         self.api_key = api_key or config.llm.api_key or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or config.llm.base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        
+        # v1.3.1: 检查 API key 和 URL
+        if not self.api_key:
+            raise LLMError(
+                ErrorCode.LLM_NOT_INITIALIZED,
+                "LLM API Key 未设置。请通过以下方式之一配置:\n"
+                "  1. 设置环境变量: export OPENAI_API_KEY='your-api-key'\n"
+                "  2. 在 ~/.nas-cli/config.yaml 中配置 llm.api_key\n"
+                "  3. 调用 init_llm(api_key='your-api-key')"
+            )
+        
+        if not self.base_url:
+            raise LLMError(
+                ErrorCode.LLM_NOT_INITIALIZED,
+                "LLM Base URL 未设置。请通过以下方式之一配置:\n"
+                "  1. 设置环境变量: export OPENAI_BASE_URL='https://api.openai.com/v1'\n"
+                "  2. 在 ~/.nas-cli/config.yaml 中配置 llm.base_url\n"
+                "  3. 调用 init_llm(base_url='your-base-url')"
+            )
         
         self.timeout = config.llm.timeout
         self.max_retries = config.llm.max_retries
@@ -155,33 +91,86 @@ class LLMClient(BaseLLMClient):
         self.models = config.llm.models
         self.current_model = None
         
-        # 初始化 OpenAI 客户端
-        if self.api_key:
-            self.client = openai.OpenAI(
-                api_key=self.api_key,
-                base_url=self.base_url,
+        # v1.3.1: 从环境变量获取代理设置
+        self.http_proxy = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
+        self.https_proxy = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
+        
+        # v1.3.1: 初始化 OpenAI 客户端，支持代理和禁用 SSL 验证
+        http_client = None
+        if self.http_proxy or self.https_proxy:
+            proxies = {}
+            if self.http_proxy:
+                proxies['http://'] = self.http_proxy
+            if self.https_proxy:
+                proxies['https://'] = self.https_proxy
+            
+            # 创建支持代理的 httpx client
+            http_client = httpx.Client(
+                verify=False,
+                proxies=proxies if proxies else None,
                 timeout=self.timeout
             )
         else:
-            self.client = None
+            # 无代理时仍禁用 SSL 验证以兼容某些环境
+            http_client = httpx.Client(verify=False, timeout=self.timeout)
+        
+        self.client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            http_client=http_client
+        )
         
         # 熔断器
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=5,
             recovery_timeout=60.0
         )
+        
+        # v1.3.1: 测试连接
+        self._test_connection()
+    
+    def _test_connection(self):
+        """v1.3.1: 测试 LLM 连接是否可用"""
+        try:
+            # 发送一个简单的测试请求
+            response = self.client.chat.completions.create(
+                model=self.models[0] if self.models else "gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+                timeout=10
+            )
+            print(f"[LLMClient] ✓ LLM 连接测试成功 (使用模型: {self.models[0]})")
+        except openai.APITimeoutError as e:
+            proxy_hint = ""
+            if not self.http_proxy and not self.https_proxy:
+                proxy_hint = (
+                    "\n\n提示: 连接超时可能是网络问题。如果您在中国大陆，"
+                    "可能需要配置代理:\n"
+                    "  export http_proxy=http://127.0.0.1:7890\n"
+                    "  export https_proxy=http://127.0.0.1:7890"
+                )
+            raise LLMError(
+                ErrorCode.LLM_CONNECTION_ERROR,
+                f"LLM 连接测试超时: {e}{proxy_hint}"
+            )
+        except openai.AuthenticationError as e:
+            raise LLMError(
+                ErrorCode.LLM_AUTHENTICATION_ERROR,
+                f"LLM API Key 验证失败: {e}\n"
+                "请检查您的 API Key 是否正确设置。"
+            )
+        except Exception as e:
+            raise LLMError(
+                ErrorCode.LLM_CONNECTION_ERROR,
+                f"LLM 连接测试失败: {e}"
+            )
     
     def _call_llm(self, prompt: str, system_msg: str = "", 
                   temperature: Optional[float] = None) -> str:
         """
         调用 LLM，带重试和熔断保护
         """
-        if not self.client:
-            raise LLMError(
-                ErrorCode.LLM_NOT_INITIALIZED,
-                "LLM 客户端未初始化，请检查 API Key 配置"
-            )
-        
         # 检查熔断器
         if not self._circuit_breaker.can_execute():
             raise LLMError(
@@ -217,6 +206,11 @@ class LLMClient(BaseLLMClient):
                 except openai.APITimeoutError as e:
                     last_error = e
                     print(f"[LLMClient] Timeout with model {model}: {e}")
+                    # v1.3.1: 超时错误提示代理配置
+                    if attempt == self.max_retries and not self.http_proxy and not self.https_proxy:
+                        print(f"[LLMClient] 提示: 如果连接持续超时，请尝试配置代理:")
+                        print(f"  export http_proxy=http://127.0.0.1:7890")
+                        print(f"  export https_proxy=http://127.0.0.1:7890")
                     continue
                 except openai.RateLimitError as e:
                     last_error = e
@@ -562,10 +556,11 @@ def init_llm(api_key: str = None, base_url: str = None, use_mock: bool = False):
     """初始化 LLM 客户端"""
     global _llm_client
     
+    # v1.3.1: 移除 Mock 支持，强制使用真实 LLM
     if use_mock:
-        _llm_client = MockLLMClient()
-    else:
-        _llm_client = LLMClient(api_key=api_key, base_url=base_url)
+        print("[LLMClient] 警告: Mock 模式已在 v1.3.1 中移除，将使用真实 LLM")
+    
+    _llm_client = LLMClient(api_key=api_key, base_url=base_url)
 
 def get_llm_client() -> BaseLLMClient:
     """获取 LLM 客户端"""

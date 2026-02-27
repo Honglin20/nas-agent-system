@@ -1,5 +1,5 @@
 """
-NAS CLI - 交互式智能 NAS 寻优空间注入工具 v1.3.0
+NAS CLI - 交互式智能 NAS 寻优空间注入工具 v1.3.1
 增强版：
 - 智能模型识别
 - 跨文件参数修改
@@ -8,10 +8,14 @@ NAS CLI - 交互式智能 NAS 寻优空间注入工具 v1.3.0
 - 完善的错误处理
 - 配置持久化
 - 撤销/重做功能
+- 代理支持
+- 备份增强和切换
+- 完成后流程优化
 """
 import os
 import sys
 import shutil
+import subprocess
 import argparse
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -22,7 +26,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 from rich.syntax import Syntax
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Prompt, Confirm, IntPrompt
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import PathCompleter
@@ -46,7 +50,7 @@ from mas_core import (
 
 console = Console()
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 
 @dataclass
@@ -65,7 +69,7 @@ class NASCandidate:
 
 
 class InteractiveNASCLI:
-    """交互式 NAS CLI v1.3.0"""
+    """交互式 NAS CLI v1.3.1"""
     
     def __init__(self, config: Optional[Config] = None):
         self.current_dir = Path.cwd()
@@ -104,6 +108,8 @@ class InteractiveNASCLI:
 │   • 完善的错误处理与重试机制                              │
 │   • 配置持久化                                            │
 │   • 撤销/重做功能                                         │
+│   • 代理支持                                              │
+│   • 备份增强与快速切换                                    │
 │                                                            │
 ╰────────────────────────────────────────────────────────────╯
         """
@@ -152,6 +158,9 @@ class InteractiveNASCLI:
                     # v1.3.0: 初始化备份管理器
                     self.backup_manager = BackupManager(str(target))
                     
+                    # v1.3.1: 显示现有备份列表
+                    self._show_existing_backups()
+                    
                     # v1.3.0: 加载项目配置
                     project_config = load_config(target)
                     if project_config:
@@ -167,6 +176,64 @@ class InteractiveNASCLI:
                     raise
         
         raise NASCLIError(ErrorCode.INVALID_INPUT, "无法获取有效的目录路径")
+    
+    def _show_existing_backups(self):
+        """v1.3.1: 显示现有备份列表"""
+        if not self.backup_manager:
+            return
+        
+        backups = self.backup_manager.list_backups_with_info()
+        if backups:
+            self.console.print(f"\n[yellow]📦 发现 {len(backups)} 个现有备份:[/yellow]")
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("ID", style="cyan", width=10)
+            table.add_column("时间", style="dim", width=20)
+            table.add_column("描述", style="green")
+            table.add_column("文件数", style="yellow", justify="right")
+            
+            for backup in backups[-5:]:  # 只显示最近5个
+                status = "[strikethrough]" if backup['undone'] else ""
+                table.add_row(
+                    backup['short_id'],
+                    backup['formatted_time'],
+                    f"{status}{backup['description'][:30]}{status}",
+                    str(backup['file_count'])
+                )
+            
+            self.console.print(table)
+            
+            # 询问是否要切换到某个备份
+            if Confirm.ask("\n是否要切换到某个备份版本?", default=False):
+                self._handle_backup_switch()
+    
+    def _handle_backup_switch(self):
+        """v1.3.1: 处理备份切换"""
+        if not self.backup_manager:
+            return
+        
+        backups = self.backup_manager.list_backups_with_info()
+        if not backups:
+            return
+        
+        self.console.print("\n[bold cyan]可用备份列表:[/bold cyan]")
+        for i, backup in enumerate(backups, 1):
+            status = " (已撤销)" if backup['undone'] else ""
+            self.console.print(f"  [{i}] {backup['short_id']} - {backup['formatted_time']} - {backup['description'][:40]}{status}")
+        
+        try:
+            choice = IntPrompt.ask("请选择要恢复的备份序号 (0 取消)", default=0)
+            if choice > 0 and choice <= len(backups):
+                selected = backups[choice - 1]
+                if Confirm.ask(f"确认切换到备份 {selected['short_id']} ?"):
+                    # 先备份当前状态，然后切换
+                    if self.backup_manager.switch_to_backup(selected['id']):
+                        self.console.print(f"[green]✓ 已成功切换到备份 {selected['short_id']}[/green]")
+                    else:
+                        self.console.print(f"[red]✗ 切换失败[/red]")
+            else:
+                self.console.print("[dim]已取消切换[/dim]")
+        except Exception as e:
+            self.console.print(f"[red]切换出错: {e}[/red]")
     
     def show_directory_preview(self, path: Path):
         """显示目录预览"""
@@ -255,18 +322,20 @@ class InteractiveNASCLI:
         return self.entry_file
     
     def scan_project(self):
-        """扫描项目 - v1.3.0 增强版"""
+        """扫描项目 - v1.3.1 增强版"""
         self.console.print("\n[bold cyan]🔍 步骤 3: 扫描项目架构[/bold cyan]\n")
         
-        # 检查 LLM 可用性
+        # v1.3.1: 检查 LLM 可用性，不再使用 Mock 模式
         if not is_llm_available():
             self.console.print("[yellow]⚠️  LLM 客户端未初始化，尝试自动初始化...[/yellow]")
             try:
                 init_llm()
             except Exception as e:
                 self.console.print(f"[red]❌ LLM 初始化失败: {e}[/red]")
-                self.console.print("[yellow]将使用 Mock 模式继续...[/yellow]")
-                init_llm(use_mock=True)
+                raise NASCLIError(
+                    ErrorCode.LLM_NOT_INITIALIZED,
+                    f"LLM 初始化失败: {e}"
+                )
         
         self.llm = get_llm_client()
         
@@ -694,23 +763,29 @@ class InteractiveNASCLI:
         return Confirm.ask("\n确认执行以上修改?", default=True)
     
     def create_backup(self):
-        """创建备份 - v1.3.0 使用 BackupManager"""
+        """创建备份 - v1.3.1 使用 BackupManager 并添加描述"""
         self.console.print("\n[bold cyan]💾 创建备份...[/bold cyan]")
         
         if not self.backup_manager:
             self.backup_manager = BackupManager(str(self.target_dir))
         
         try:
+            # v1.3.1: 生成详细的备份描述
+            selected_count = len([c for c in self.candidates if c.selected])
+            description = f"NAS v{__version__} - {selected_count} 个参数 - {self.entry_file or 'unknown'}"
+            
             operation = self.backup_manager.create_backup(
-                description=f"NAS CLI v{__version__} injection",
+                description=description,
                 metadata={
                     'version': __version__,
                     'entry_file': self.entry_file,
-                    'candidate_count': len([c for c in self.candidates if c.selected])
+                    'candidate_count': selected_count,
+                    'scan_mode': 'full'
                 }
             )
             self.current_operation = operation
             self.console.print(f"[green]✓ 备份已创建: {operation.id}[/green]")
+            self.console.print(f"[dim]  描述: {description}[/dim]")
             return operation
         except Exception as e:
             self.console.print(f"[red]✗ 备份创建失败: {e}[/red]")
@@ -876,8 +951,76 @@ class InteractiveNASCLI:
             if self.config.ui.verbose:
                 self.console.print(f"[dim]Report 注入失败: {e}[/dim]")
     
+    def _handle_post_completion(self):
+        """
+        v1.3.1: 处理完成后的流程
+        给用户两个选项：
+        1. 继续执行 nas-start 命令
+        2. 回退到原来的版本
+        """
+        self.console.print("\n" + "=" * 60)
+        self.console.print("[bold green]🎉 NAS 寻优空间注入完成![/bold green]")
+        if self.current_operation:
+            self.console.print(f"[dim]备份 ID: {self.current_operation.id} (可用于撤销)[/dim]")
+        self.console.print("=" * 60)
+        
+        self.console.print("\n[bold cyan]请选择接下来的操作:[/bold cyan]")
+        self.console.print("  [1] 继续执行 nas-start 命令（启动 NAS 训练）")
+        self.console.print("  [2] 回退到原来的版本")
+        self.console.print("  [3] 退出")
+        
+        choice = Prompt.ask("请选择", choices=["1", "2", "3"], default="1")
+        
+        if choice == "1":
+            self._run_nas_start()
+        elif choice == "2":
+            self._rollback()
+        else:
+            self.console.print("[dim]已退出[/dim]")
+    
+    def _run_nas_start(self):
+        """v1.3.1: 执行 nas-start 命令"""
+        self.console.print("\n[bold cyan]🚀 启动 nas-start...[/bold cyan]")
+        
+        try:
+            # 检查 nas-start 是否可用
+            result = subprocess.run(
+                ["which", "nas-start"],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                self.console.print("[yellow]⚠️  nas-start 命令未找到[/yellow]")
+                self.console.print("[dim]请确保 nas-start 已安装并在 PATH 中[/dim]")
+                return
+            
+            # 执行 nas-start
+            self.console.print("[dim]执行: nas-start[/dim]")
+            subprocess.run(["nas-start"], cwd=self.target_dir)
+            
+        except Exception as e:
+            self.console.print(f"[red]启动 nas-start 失败: {e}[/red]")
+    
+    def _rollback(self):
+        """v1.3.1: 回退到原来的版本"""
+        self.console.print("\n[bold cyan]↩️  回退到原版本...[/bold cyan]")
+        
+        if not self.backup_manager or not self.current_operation:
+            self.console.print("[yellow]⚠️  没有可回退的备份[/yellow]")
+            return
+        
+        try:
+            success = self.backup_manager.undo(self.current_operation.id)
+            if success:
+                self.console.print("[green]✓ 已成功回退到原版本[/green]")
+            else:
+                self.console.print("[red]✗ 回退失败[/red]")
+        except Exception as e:
+            self.console.print(f"[red]回退出错: {e}[/red]")
+    
     def run(self):
-        """运行完整流程 v1.3.0"""
+        """运行完整流程 v1.3.1"""
         self.show_banner()
         
         if self.target_dir is None:
@@ -885,6 +1028,10 @@ class InteractiveNASCLI:
         else:
             self.console.print(f"\n[green]✓ 使用指定目录:[/green] {self.target_dir}")
             self.show_directory_preview(self.target_dir)
+            
+            # v1.3.1: 显示现有备份
+            if self.backup_manager:
+                self._show_existing_backups()
         
         if self.entry_file is None:
             self.ask_entry_file()
@@ -940,17 +1087,14 @@ class InteractiveNASCLI:
             if self.config.ui.verbose:
                 self.console.print(f"[dim]Report 注入出错: {e}[/dim]")
         
-        self.console.print("\n" + "="*60)
-        self.console.print("[bold green]🎉 NAS 寻优空间注入完成![/bold green]")
-        if backup_op:
-            self.console.print(f"[dim]备份 ID: {backup_op.id} (可用于撤销)[/dim]")
-        self.console.print("="*60)
+        # v1.3.1: 完成后流程
+        self._handle_post_completion()
 
 
 def main():
     """CLI 入口"""
     parser = argparse.ArgumentParser(
-        description="NAS-CLI 智能神经网络架构搜索工具 v1.3.0 (Enhanced)",
+        description="NAS-CLI 智能神经网络架构搜索工具 v1.3.1 (Enhanced)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
@@ -959,10 +1103,13 @@ def main():
   nas-cli --dir ./project --entry main.py  指定目录和入口文件
   nas-cli --undo       撤销上次修改
   nas-cli --config     编辑配置文件
+  nas-cli --backups    列出所有备份
   
 环境变量:
   OPENAI_API_KEY       LLM API Key
   OPENAI_BASE_URL      LLM API URL
+  http_proxy           HTTP 代理 (e.g., http://127.0.0.1:7890)
+  https_proxy          HTTPS 代理 (e.g., http://127.0.0.1:7890)
   NAS_CLI_VERBOSE      详细输出模式 (1/true/yes)
   NAS_CLI_LANGUAGE     界面语言 (zh/en)
         """
@@ -972,7 +1119,8 @@ def main():
     parser.add_argument('--entry', '-e', help='入口文件')
     parser.add_argument('--undo', action='store_true', help='撤销上次修改')
     parser.add_argument('--config', action='store_true', help='编辑配置文件')
-    parser.add_argument('--mock', action='store_true', help='使用 Mock LLM (测试模式)')
+    parser.add_argument('--backups', '-b', action='store_true', help='列出所有备份')
+    parser.add_argument('--switch', '-s', help='切换到指定备份 ID')
     parser.add_argument('--verbose', '-v', action='store_true', help='详细输出')
     
     args = parser.parse_args()
@@ -994,6 +1142,29 @@ def main():
         console.print(f"请使用文本编辑器修改: {config_path}")
         return
     
+    # 处理 --backups
+    if args.backups:
+        if args.dir:
+            target_dir = Path(args.dir)
+            backup_manager = BackupManager(str(target_dir))
+            backup_manager.display_backup_list()
+        else:
+            console.print("[red]请使用 --dir 指定项目目录[/red]")
+        return
+    
+    # 处理 --switch
+    if args.switch:
+        if args.dir:
+            target_dir = Path(args.dir)
+            backup_manager = BackupManager(str(target_dir))
+            if backup_manager.switch_to_backup(args.switch):
+                console.print(f"[green]✓ 已切换到备份 {args.switch[:8]}[/green]")
+            else:
+                console.print(f"[red]✗ 切换失败[/red]")
+        else:
+            console.print("[red]请使用 --dir 指定项目目录[/red]")
+        return
+    
     # 处理 --undo
     if args.undo:
         if args.dir:
@@ -1008,19 +1179,15 @@ def main():
             console.print("[red]请使用 --dir 指定项目目录[/red]")
         return
     
-    # 初始化 LLM
-    if args.mock:
-        init_llm(use_mock=True)
-        console.print("[dim]✓ Mock LLM 客户端初始化成功 (测试模式)[/dim]")
-    else:
-        try:
-            init_llm()
-            if config.ui.verbose:
-                console.print("[dim]✓ LLM 客户端初始化成功[/dim]")
-        except Exception as e:
-            console.print(f"[yellow]⚠️  LLM 初始化失败: {e}[/yellow]")
-            console.print("[yellow]将使用 Mock 模式继续...[/yellow]")
-            init_llm(use_mock=True)
+    # v1.3.1: 初始化 LLM（不再支持 Mock 模式）
+    try:
+        init_llm()
+        if config.ui.verbose:
+            console.print("[dim]✓ LLM 客户端初始化成功[/dim]")
+    except Exception as e:
+        console.print(f"[red]❌ LLM 初始化失败: {e}[/red]")
+        console.print("[yellow]请检查 API Key 和代理配置后重试[/yellow]")
+        sys.exit(1)
     
     cli = InteractiveNASCLI(config)
     

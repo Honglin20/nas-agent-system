@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="nas-cli",
-    version="1.0.0",
+    version="1.3.0",
     author="NAS Agent Team",
     description="智能 NAS 寻优空间注入 CLI 工具",
     long_description=long_description,
@@ -22,6 +22,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
     ],
     python_requires=">=3.8",
     install_requires=[
@@ -32,6 +33,15 @@ setup(
         "prompt-toolkit>=3.0.0",
         "click>=8.0.0",
     ],
+    extras_require={
+        "dev": [
+            "pytest>=7.0.0",
+            "pytest-cov>=4.0.0",
+            "black>=23.0.0",
+            "flake8>=6.0.0",
+            "mypy>=1.0.0",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "nas-cli=nas_cli.main:main",

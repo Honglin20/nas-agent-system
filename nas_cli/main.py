@@ -1,10 +1,13 @@
 """
-NAS CLI - 交互式智能 NAS 寻优空间注入工具 v1.2.0
+NAS CLI - 交互式智能 NAS 寻优空间注入工具 v1.3.0
 增强版：
 - 智能模型识别
 - 跨文件参数修改
 - LLM 驱动的 Report 插入
 - 寻优空间张开
+- 完善的错误处理
+- 配置持久化
+- 撤销/重做功能
 """
 import os
 import sys
@@ -20,7 +23,7 @@ from rich.table import Table
 from rich.tree import Tree
 from rich.syntax import Syntax
 from rich.prompt import Prompt, Confirm
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import PathCompleter
 
@@ -33,12 +36,17 @@ from mas_core import (
     ModelDiscoveryAnalyzer,
     CrossFileParameterModifier,
     SearchSpaceExpander,
-    inject_report_to_project
+    inject_report_to_project,
+    # v1.3.0 新增
+    Config, ConfigManager, get_config, load_config,
+    BackupManager, Operation,
+    NASCLIError, ErrorCode, get_user_friendly_message,
+    is_llm_available,
 )
 
 console = Console()
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 @dataclass
@@ -57,9 +65,9 @@ class NASCandidate:
 
 
 class InteractiveNASCLI:
-    """交互式 NAS CLI v1.2.0"""
+    """交互式 NAS CLI v1.3.0"""
     
-    def __init__(self):
+    def __init__(self, config: Optional[Config] = None):
         self.current_dir = Path.cwd()
         self.target_dir: Optional[Path] = None
         self.entry_file: Optional[str] = None
@@ -69,10 +77,17 @@ class InteractiveNASCLI:
         self.llm = None
         self.modifier_agent = ModifierAgent()
         
+        # v1.3.0: 配置
+        self.config = config or get_config()
+        
         # v1.2.0 新增组件
         self.model_discovery: Optional[ModelDiscoveryAnalyzer] = None
         self.cross_file_modifier: Optional[CrossFileParameterModifier] = None
         self.search_space_expander: Optional[SearchSpaceExpander] = None
+        
+        # v1.3.0: 备份管理器
+        self.backup_manager: Optional[BackupManager] = None
+        self.current_operation: Optional[Operation] = None
         
     def show_banner(self):
         """显示欢迎界面"""
@@ -86,6 +101,9 @@ class InteractiveNASCLI:
 │   • 跨文件参数修改                                        │
 │   • LLM 驱动的 Report 插入                                │
 │   • 寻优空间张开                                          │
+│   • 完善的错误处理与重试机制                              │
+│   • 配置持久化                                            │
+│   • 撤销/重做功能                                         │
 │                                                            │
 ╰────────────────────────────────────────────────────────────╯
         """
@@ -96,35 +114,59 @@ class InteractiveNASCLI:
         self.console.print("\n[bold cyan]📁 步骤 1: 选择目标项目目录[/bold cyan]")
         self.console.print(f"当前目录: [dim]{self.current_dir}[/dim]\n")
         
-        while True:
-            completer = PathCompleter(only_directories=True)
-            path_input = prompt(
-                "请输入项目目录路径 (支持 Tab 补全): ",
-                completer=completer,
-                default=str(self.current_dir)
-            ).strip()
-            
-            target = Path(path_input).expanduser().resolve()
-            
-            if not target.exists():
-                self.console.print(f"[red]❌ 目录不存在: {target}[/red]")
-                continue
-            
-            if not target.is_dir():
-                self.console.print(f"[red]❌ 这不是一个目录: {target}[/red]")
-                continue
-            
-            self.console.print(f"\n[green]✓ 已选择目录:[/green] {target}")
-            self.show_directory_preview(target)
-            
-            if Confirm.ask("确认使用此目录?", default=True):
-                self.target_dir = target
-                os.chdir(target)
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                completer = PathCompleter(only_directories=True)
+                path_input = prompt(
+                    "请输入项目目录路径 (支持 Tab 补全): ",
+                    completer=completer,
+                    default=str(self.current_dir)
+                ).strip()
                 
-                # v1.2.0: 初始化跨文件修改器
-                self.cross_file_modifier = CrossFileParameterModifier(str(target))
+                target = Path(path_input).expanduser().resolve()
                 
-                return target
+                if not target.exists():
+                    self.console.print(f"[red]❌ 目录不存在: {target}[/red]")
+                    continue
+                
+                if not target.is_dir():
+                    self.console.print(f"[red]❌ 这不是一个目录: {target}[/red]")
+                    continue
+                
+                # 检查目录权限
+                if not os.access(target, os.R_OK):
+                    self.console.print(f"[red]❌ 没有读取权限: {target}[/red]")
+                    continue
+                
+                self.console.print(f"\n[green]✓ 已选择目录:[/green] {target}")
+                self.show_directory_preview(target)
+                
+                if Confirm.ask("确认使用此目录?", default=True):
+                    self.target_dir = target
+                    os.chdir(target)
+                    
+                    # v1.2.0: 初始化跨文件修改器
+                    self.cross_file_modifier = CrossFileParameterModifier(str(target))
+                    
+                    # v1.3.0: 初始化备份管理器
+                    self.backup_manager = BackupManager(str(target))
+                    
+                    # v1.3.0: 加载项目配置
+                    project_config = load_config(target)
+                    if project_config:
+                        self.config = project_config
+                    
+                    return target
+                    
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                self.console.print(f"[red]❌ 错误: {e}[/red]")
+                if attempt == max_attempts - 1:
+                    raise
+        
+        raise NASCLIError(ErrorCode.INVALID_INPUT, "无法获取有效的目录路径")
     
     def show_directory_preview(self, path: Path):
         """显示目录预览"""
@@ -134,7 +176,7 @@ class InteractiveNASCLI:
             items = list(path.iterdir())[:20]
             for item in items:
                 if item.is_dir():
-                    if not item.name.startswith('.') and item.name not in ['__pycache__', 'venv', 'env']:
+                    if not item.name.startswith('.') and item.name not in self.config.analysis.exclude_patterns:
                         tree.add(f"📁 {item.name}/")
                 elif item.suffix == '.py':
                     tree.add(f"🐍 {item.name}")
@@ -155,7 +197,7 @@ class InteractiveNASCLI:
         
         py_files = []
         for f in self.target_dir.rglob("*.py"):
-            if not any(part.startswith('.') or part in ['__pycache__', 'venv', 'env'] 
+            if not any(part.startswith('.') or part in self.config.analysis.exclude_patterns 
                       for part in f.parts):
                 py_files.append(f)
         
@@ -179,83 +221,130 @@ class InteractiveNASCLI:
         
         self.console.print(table)
         
-        while True:
-            choice = Prompt.ask(
-                "\n请选择入口文件 (输入序号或完整路径)",
-                default="1"
-            )
-            
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
-                idx = int(choice) - 1
-                if 0 <= idx < len(py_files[:15]):
-                    selected = py_files[idx]
-                    self.entry_file = str(selected.relative_to(self.target_dir))
-                    break
-            except ValueError:
-                file_path = self.target_dir / choice
-                if file_path.exists():
-                    self.entry_file = choice
-                    break
-            
-            self.console.print("[red]❌ 无效选择，请重试[/red]")
+                choice = Prompt.ask(
+                    "\n请选择入口文件 (输入序号或完整路径)",
+                    default="1"
+                )
+                
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(py_files[:15]):
+                        selected = py_files[idx]
+                        self.entry_file = str(selected.relative_to(self.target_dir))
+                        break
+                except ValueError:
+                    file_path = self.target_dir / choice
+                    if file_path.exists():
+                        self.entry_file = choice
+                        break
+                
+                self.console.print("[red]❌ 无效选择，请重试[/red]")
+                
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                self.console.print(f"[red]❌ 错误: {e}[/red]")
+        
+        if not self.entry_file:
+            raise NASCLIError(ErrorCode.INVALID_INPUT, "未选择有效的入口文件")
         
         self.console.print(f"[green]✓ 已选择入口文件:[/green] {self.entry_file}")
         return self.entry_file
     
     def scan_project(self):
-        """扫描项目 - v1.2.0 增强版"""
+        """扫描项目 - v1.3.0 增强版"""
         self.console.print("\n[bold cyan]🔍 步骤 3: 扫描项目架构[/bold cyan]\n")
         
-        # 初始化 LLM
+        # 检查 LLM 可用性
+        if not is_llm_available():
+            self.console.print("[yellow]⚠️  LLM 客户端未初始化，尝试自动初始化...[/yellow]")
+            try:
+                init_llm()
+            except Exception as e:
+                self.console.print(f"[red]❌ LLM 初始化失败: {e}[/red]")
+                self.console.print("[yellow]将使用 Mock 模式继续...[/yellow]")
+                init_llm(use_mock=True)
+        
         self.llm = get_llm_client()
         
         # 发现 Python 文件
         self.console.print("[yellow]📂 发现 Python 文件...[/yellow]")
         py_files = []
         for f in self.target_dir.rglob("*.py"):
-            if not any(part.startswith('.') or part in ['__pycache__', 'venv', 'env', '.git'] 
+            if not any(part.startswith('.') or part in self.config.analysis.exclude_patterns 
                       for part in f.parts):
-                py_files.append(f)
+                # 检查文件大小
+                try:
+                    if f.stat().st_size > self.config.analysis.max_file_size:
+                        self.console.print(f"[dim]  跳过超大文件: {f.name}[/dim]")
+                        continue
+                    py_files.append(f)
+                except:
+                    pass
+        
         self.console.print(f"[green]✓ 发现 {len(py_files)} 个 Python 文件[/green]\n")
         
         self.scanned_files = [str(f.relative_to(self.target_dir)) for f in py_files]
         
         # v1.2.0: 智能模型发现
         if self.entry_file:
-            self.console.print("[yellow]🤖 正在进行智能模型发现...[/yellow]")
-            self.model_discovery = ModelDiscoveryAnalyzer(
-                str(self.target_dir), 
-                self.llm
-            )
-            entry_path = self.target_dir / self.entry_file
-            discovery_result = self.model_discovery.run_full_discovery(entry_path)
-            
-            if discovery_result.get("instantiated_model"):
-                model_info = discovery_result["instantiated_model"]
-                self.console.print(f"[green]✓ 识别到实际被实例化的模型:[/green]")
-                self.console.print(f"  • 模型: [cyan]{model_info.get('instantiated_model')}[/cyan]")
-                self.console.print(f"  • 变量: [cyan]{model_info.get('model_variable')}[/cyan]")
-                self.console.print(f"  • 置信度: [cyan]{model_info.get('confidence')}[/cyan]\n")
+            try:
+                self.console.print("[yellow]🤖 正在进行智能模型发现...[/yellow]")
+                self.model_discovery = ModelDiscoveryAnalyzer(
+                    str(self.target_dir), 
+                    self.llm
+                )
+                entry_path = self.target_dir / self.entry_file
+                discovery_result = self.model_discovery.run_full_discovery(entry_path)
+                
+                if discovery_result.get("instantiated_model"):
+                    model_info = discovery_result["instantiated_model"]
+                    self.console.print(f"[green]✓ 识别到实际被实例化的模型:[/green]")
+                    self.console.print(f"  • 模型: [cyan]{model_info.get('instantiated_model')}[/cyan]")
+                    self.console.print(f"  • 变量: [cyan]{model_info.get('model_variable')}[/cyan]")
+                    self.console.print(f"  • 置信度: [cyan]{model_info.get('confidence')}[/cyan]\n")
+            except Exception as e:
+                if self.config.ui.verbose:
+                    self.console.print(f"[dim]模型发现失败: {e}[/dim]")
         
         # 分析所有文件
         all_agents = {}
-        for f in py_files:
-            rel_path = str(f.relative_to(self.target_dir))
-            self.console.print(f"[yellow]🤖 LLM 正在分析: {rel_path}[/yellow]")
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TimeElapsedColumn(),
+            console=self.console
+        ) as progress:
+            task = progress.add_task("[yellow]分析文件中...", total=len(py_files))
             
-            agent = ScopeAgent(str(f))
-            if agent.load_file():
-                analysis = agent.analyze()
-                all_agents[rel_path] = agent
+            for f in py_files:
+                rel_path = str(f.relative_to(self.target_dir))
+                progress.update(task, description=f"[yellow]分析: {rel_path}[/yellow]")
                 
-                # 实时打印该文件的候选
-                candidates = analysis.get('nas_candidates', [])
-                if candidates:
-                    self.console.print(f"[green]  ↳ 发现 {len(candidates)} 个候选[/green]")
-                    for cand in candidates[:3]:
-                        self.console.print(f"    • [cyan]{cand.get('name')}[/cyan] = [yellow]{cand.get('current_value')}[/yellow]")
-                    if len(candidates) > 3:
-                        self.console.print(f"    ... 还有 {len(candidates) - 3} 个")
+                try:
+                    agent = ScopeAgent(str(f))
+                    if agent.load_file():
+                        analysis = agent.analyze()
+                        all_agents[rel_path] = agent
+                        
+                        # 实时打印该文件的候选
+                        candidates = analysis.get('nas_candidates', [])
+                        if candidates and self.config.ui.verbose:
+                            self.console.print(f"[green]  ↳ 发现 {len(candidates)} 个候选[/green]")
+                            for cand in candidates[:3]:
+                                self.console.print(f"    • [cyan]{cand.get('name')}[/cyan] = [yellow]{cand.get('current_value')}[/yellow]")
+                            if len(candidates) > 3:
+                                self.console.print(f"    ... 还有 {len(candidates) - 3} 个")
+                except Exception as e:
+                    if self.config.ui.verbose:
+                        self.console.print(f"[dim]  分析失败 {rel_path}: {e}[/dim]")
+                
+                progress.advance(task)
         
         self.console.print()
         
@@ -270,25 +359,32 @@ class InteractiveNASCLI:
         self.candidates = []
         
         for file_path, agent in all_agents.items():
-            for cand in agent.get_nas_candidates():
-                # 使用 LLM 生成搜索空间
-                search_space = self.llm.generate_search_space(
-                    cand['name'],
-                    cand['current_value'],
-                    cand['type']
-                )
-                
-                nas_cand = NASCandidate(
-                    name=cand['name'],
-                    param_type=cand['type'],
-                    current_value=cand['current_value'],
-                    location=file_path,
-                    line=cand.get('line', 0),
-                    recommended=True,
-                    reason=cand.get('reason', ''),
-                    search_space=search_space
-                )
-                self.candidates.append(nas_cand)
+            try:
+                for cand in agent.get_nas_candidates():
+                    # 使用 LLM 生成搜索空间
+                    try:
+                        search_space = self.llm.generate_search_space(
+                            cand['name'],
+                            cand['current_value'],
+                            cand['type']
+                        )
+                    except Exception:
+                        search_space = [cand['current_value']]
+                    
+                    nas_cand = NASCandidate(
+                        name=cand['name'],
+                        param_type=cand['type'],
+                        current_value=cand['current_value'],
+                        location=file_path,
+                        line=cand.get('line', 0),
+                        recommended=True,
+                        reason=cand.get('reason', ''),
+                        search_space=search_space
+                    )
+                    self.candidates.append(nas_cand)
+            except Exception as e:
+                if self.config.ui.verbose:
+                    self.console.print(f"[dim]  收集候选失败 {file_path}: {e}[/dim]")
         
         # 添加配置文件候选
         for cand in config_candidates:
@@ -307,24 +403,28 @@ class InteractiveNASCLI:
         # 使用 LLM 推荐
         if self.candidates:
             self.console.print(f"[yellow]🤖 LLM 正在评估 {len(self.candidates)} 个候选的推荐优先级...[/yellow]")
-            cand_dicts = [
-                {
-                    'name': c.name,
-                    'type': c.param_type,
-                    'current_value': str(c.current_value),
-                    'reason': c.reason
-                }
-                for c in self.candidates
-            ]
-            recommendations = self.llm.recommend_injection(cand_dicts)
-            
-            rec_map = {r['name']: r for r in recommendations}
-            for cand in self.candidates:
-                if cand.name in rec_map:
-                    cand.recommended = rec_map[cand.name].get('recommended', True)
-                    cand.reason = rec_map[cand.name].get('reason', cand.reason)
-            
-            self.console.print(f"[green]✓ LLM 推荐 {sum(1 for c in self.candidates if c.recommended)}/{len(self.candidates)} 个参数[/green]")
+            try:
+                cand_dicts = [
+                    {
+                        'name': c.name,
+                        'type': c.param_type,
+                        'current_value': str(c.current_value),
+                        'reason': c.reason
+                    }
+                    for c in self.candidates
+                ]
+                recommendations = self.llm.recommend_injection(cand_dicts)
+                
+                rec_map = {r['name']: r for r in recommendations}
+                for cand in self.candidates:
+                    if cand.name in rec_map:
+                        cand.recommended = rec_map[cand.name].get('recommended', True)
+                        cand.reason = rec_map[cand.name].get('reason', cand.reason)
+                
+                self.console.print(f"[green]✓ LLM 推荐 {sum(1 for c in self.candidates if c.recommended)}/{len(self.candidates)} 个参数[/green]")
+            except Exception as e:
+                if self.config.ui.verbose:
+                    self.console.print(f"[dim]LLM 推荐失败: {e}[/dim]")
         
         self.console.print()
         self.show_scan_results(all_agents, config_candidates)
@@ -347,18 +447,16 @@ class InteractiveNASCLI:
                 # 递归查找数值参数
                 self._extract_from_dict(config, rel_path, candidates)
             except Exception as e:
-                pass
+                if self.config.ui.verbose:
+                    pass
         
         return candidates
     
     def _extract_from_dict(self, data: Dict, file_path: str, 
                            candidates: List, prefix: str = ""):
         """从字典中提取候选参数"""
-        nas_keywords = [
-            'lr', 'learning_rate', 'batch_size', 'epoch', 'dropout', 
-            'dim', 'hidden', 'layer', 'head', 'rate', 'weight_decay',
-            'momentum', 'beta', 'gamma', 'alpha'
-        ]
+        nas_keywords = self.config.nas.value_keywords
+        layer_keywords = self.config.nas.layer_keywords
         
         for key, value in data.items():
             full_key = f"{prefix}.{key}" if prefix else key
@@ -377,7 +475,7 @@ class InteractiveNASCLI:
                         'reason': f'Configuration parameter: {key}'
                     })
             elif isinstance(value, str):
-                if key.lower() in ['activation', 'optimizer', 'norm', 'loss']:
+                if any(kw in key.lower() for kw in layer_keywords):
                     candidates.append({
                         'name': full_key,
                         'type': 'layer',
@@ -513,10 +611,16 @@ class InteractiveNASCLI:
         parts = range_str.replace(' ', '').split(',')
         for part in parts:
             if '-' in part:
-                start, end = part.split('-')
-                result.update(range(int(start), int(end) + 1))
+                try:
+                    start, end = part.split('-')
+                    result.update(range(int(start), int(end) + 1))
+                except:
+                    pass
             else:
-                result.add(int(part))
+                try:
+                    result.add(int(part))
+                except:
+                    pass
         return result
     
     def _customize_search_space(self, selected: List[NASCandidate]):
@@ -584,35 +688,38 @@ class InteractiveNASCLI:
                 self.console.print(f"  [green]+ {after}[/green]")
                 self.console.print(f"    [dim]{cand.reason}[/dim]\n")
         
+        if not self.config.ui.confirm_before_modify:
+            return True
+        
         return Confirm.ask("\n确认执行以上修改?", default=True)
     
     def create_backup(self):
-        """创建备份"""
+        """创建备份 - v1.3.0 使用 BackupManager"""
         self.console.print("\n[bold cyan]💾 创建备份...[/bold cyan]")
         
-        backup_dir = self.target_dir / ".nas_backup"
+        if not self.backup_manager:
+            self.backup_manager = BackupManager(str(self.target_dir))
         
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-        
-        backup_dir.mkdir(exist_ok=True)
-        
-        # 备份所有 Python 文件
-        for py_file in self.target_dir.rglob("*.py"):
-            if any(part.startswith('.') or part in ['__pycache__', 'venv'] 
-                   for part in py_file.parts):
-                continue
-            
-            rel_path = py_file.relative_to(self.target_dir)
-            backup_path = backup_dir / rel_path
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(py_file, backup_path)
-        
-        self.console.print(f"[green]✓ 备份已创建: {backup_dir}[/green]")
-        return backup_dir
+        try:
+            operation = self.backup_manager.create_backup(
+                description=f"NAS CLI v{__version__} injection",
+                metadata={
+                    'version': __version__,
+                    'entry_file': self.entry_file,
+                    'candidate_count': len([c for c in self.candidates if c.selected])
+                }
+            )
+            self.current_operation = operation
+            self.console.print(f"[green]✓ 备份已创建: {operation.id}[/green]")
+            return operation
+        except Exception as e:
+            self.console.print(f"[red]✗ 备份创建失败: {e}[/red]")
+            if not Confirm.ask("是否继续而不创建备份?", default=False):
+                raise
+            return None
     
     def apply_modifications(self):
-        """应用修改 - v1.2.0 增强版"""
+        """应用修改 - v1.3.0 增强版"""
         self.console.print("\n[bold cyan]🔧 步骤 6: 应用修改[/bold cyan]\n")
         
         selected = [c for c in self.candidates if c.selected]
@@ -627,7 +734,13 @@ class InteractiveNASCLI:
         success_count = 0
         fail_count = 0
         
-        with Progress(console=self.console) as progress:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=self.console
+        ) as progress:
             task = progress.add_task("[yellow]修改文件中...", total=len(by_file))
             
             for file_path, cands in by_file.items():
@@ -689,27 +802,54 @@ class InteractiveNASCLI:
                 
                 if success:
                     success_count += 1
-                    self.console.print(f"[green]  ✓ 已修改: {file_path}[/green]")
+                    if self.config.ui.verbose:
+                        self.console.print(f"[green]  ✓ 已修改: {file_path}[/green]")
                 else:
                     fail_count += 1
                 
                 progress.advance(task)
         
         self.console.print(f"\n[green]✓ 修改完成![/green] 成功: {success_count}, 失败: {fail_count}")
+        
+        if fail_count > 0 and self.backup_manager and self.current_operation:
+            if Confirm.ask("部分修改失败，是否撤销所有修改?", default=True):
+                self.undo_modifications()
+    
+    def undo_modifications(self):
+        """v1.3.0: 撤销修改"""
+        if not self.backup_manager or not self.current_operation:
+            self.console.print("[yellow]⚠️  没有可撤销的操作[/yellow]")
+            return
+        
+        self.console.print("\n[bold cyan]↩️  撤销修改...[/bold cyan]")
+        
+        try:
+            success = self.backup_manager.undo(self.current_operation.id)
+            if success:
+                self.console.print("[green]✓ 修改已撤销[/green]")
+            else:
+                self.console.print("[red]✗ 撤销失败[/red]")
+        except Exception as e:
+            self.console.print(f"[red]✗ 撤销出错: {e}[/red]")
     
     def run_search_space_expansion(self):
         """v1.2.0: 运行寻优空间张开"""
         self.console.print("\n[bold cyan]🌐 步骤 7: 寻优空间张开[/bold cyan]\n")
         
         self.search_space_expander = SearchSpaceExpander(self.llm)
-        expanded_files = self.search_space_expander.expand_project(str(self.target_dir))
         
-        if expanded_files:
-            self.console.print(f"[green]✓ 已张开 {len(expanded_files)} 个文件:[/green]")
-            for f in expanded_files:
-                self.console.print(f"  • {f}")
-        else:
-            self.console.print("[dim]未发现需要张开的条件层选择[/dim]")
+        try:
+            expanded_files = self.search_space_expander.expand_project(str(self.target_dir))
+            
+            if expanded_files:
+                self.console.print(f"[green]✓ 已张开 {len(expanded_files)} 个文件:[/green]")
+                for f in expanded_files:
+                    self.console.print(f"  • {f}")
+            else:
+                self.console.print("[dim]未发现需要张开的条件层选择[/dim]")
+        except Exception as e:
+            if self.config.ui.verbose:
+                self.console.print(f"[dim]寻优空间张开失败: {e}[/dim]")
     
     def run_report_injection(self):
         """v1.2.0: 运行 Report 注入"""
@@ -719,21 +859,25 @@ class InteractiveNASCLI:
             self.console.print("[yellow]⚠️  未指定入口文件，跳过 report 注入[/yellow]")
             return
         
-        modified_files = inject_report_to_project(
-            str(self.target_dir),
-            self.entry_file,
-            self.llm
-        )
-        
-        if modified_files:
-            self.console.print(f"[green]✓ 已注入 report 到 {len(modified_files)} 个文件:[/green]")
-            for f in modified_files:
-                self.console.print(f"  • {f}")
-        else:
-            self.console.print("[dim]未发现需要注入 report 的文件[/dim]")
+        try:
+            modified_files = inject_report_to_project(
+                str(self.target_dir),
+                self.entry_file,
+                self.llm
+            )
+            
+            if modified_files:
+                self.console.print(f"[green]✓ 已注入 report 到 {len(modified_files)} 个文件:[/green]")
+                for f in modified_files:
+                    self.console.print(f"  • {f}")
+            else:
+                self.console.print("[dim]未发现需要注入 report 的文件[/dim]")
+        except Exception as e:
+            if self.config.ui.verbose:
+                self.console.print(f"[dim]Report 注入失败: {e}[/dim]")
     
     def run(self):
-        """运行完整流程 v1.2.0"""
+        """运行完整流程 v1.3.0"""
         self.show_banner()
         
         if self.target_dir is None:
@@ -751,7 +895,16 @@ class InteractiveNASCLI:
             self.console.print("[yellow]已取消[/yellow]")
             return
         
-        self.scan_project()
+        try:
+            self.scan_project()
+        except NASCLIError as e:
+            self.console.print(f"\n[red]扫描失败: {get_user_friendly_message(e)}[/red]")
+            if self.config.ui.verbose:
+                self.console.print(f"[dim]详情: {e}[/dim]")
+            return
+        except Exception as e:
+            self.console.print(f"\n[red]扫描出错: {e}[/red]")
+            return
         
         if not self.select_candidates():
             self.console.print("[yellow]未选择任何参数，退出[/yellow]")
@@ -762,59 +915,122 @@ class InteractiveNASCLI:
             return
         
         # 创建备份
-        self.create_backup()
+        backup_op = self.create_backup()
         
         # 应用修改
-        self.apply_modifications()
+        try:
+            self.apply_modifications()
+        except Exception as e:
+            self.console.print(f"\n[red]修改失败: {e}[/red]")
+            if backup_op and Confirm.ask("是否撤销修改?", default=True):
+                self.undo_modifications()
+            return
         
         # v1.2.0: 寻优空间张开
-        self.run_search_space_expansion()
+        try:
+            self.run_search_space_expansion()
+        except Exception as e:
+            if self.config.ui.verbose:
+                self.console.print(f"[dim]寻优空间张开出错: {e}[/dim]")
         
         # v1.2.0: Report 注入
-        self.run_report_injection()
+        try:
+            self.run_report_injection()
+        except Exception as e:
+            if self.config.ui.verbose:
+                self.console.print(f"[dim]Report 注入出错: {e}[/dim]")
         
         self.console.print("\n" + "="*60)
         self.console.print("[bold green]🎉 NAS 寻优空间注入完成![/bold green]")
+        if backup_op:
+            self.console.print(f"[dim]备份 ID: {backup_op.id} (可用于撤销)[/dim]")
         self.console.print("="*60)
 
 
 def main():
     """CLI 入口"""
     parser = argparse.ArgumentParser(
-        description="NAS-CLI 智能神经网络架构搜索工具 v1.2.0 (Enhanced)",
+        description="NAS-CLI 智能神经网络架构搜索工具 v1.3.0 (Enhanced)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
   nas-cli              启动交互式界面
   nas-cli --version    显示版本信息
+  nas-cli --dir ./project --entry main.py  指定目录和入口文件
+  nas-cli --undo       撤销上次修改
+  nas-cli --config     编辑配置文件
   
 环境变量:
   OPENAI_API_KEY       LLM API Key
   OPENAI_BASE_URL      LLM API URL
+  NAS_CLI_VERBOSE      详细输出模式 (1/true/yes)
+  NAS_CLI_LANGUAGE     界面语言 (zh/en)
         """
     )
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     parser.add_argument('--dir', '-d', help='目标项目目录')
     parser.add_argument('--entry', '-e', help='入口文件')
+    parser.add_argument('--undo', action='store_true', help='撤销上次修改')
+    parser.add_argument('--config', action='store_true', help='编辑配置文件')
+    parser.add_argument('--mock', action='store_true', help='使用 Mock LLM (测试模式)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='详细输出')
     
     args = parser.parse_args()
     
+    # 加载配置
+    config = load_config()
+    
+    if args.verbose:
+        config.ui.verbose = True
+    
+    # 处理 --config
+    if args.config:
+        console.print("[bold cyan]编辑配置文件[/bold cyan]")
+        config_path = ConfigManager.DEFAULT_CONFIG_FILE
+        console.print(f"配置文件路径: {config_path}")
+        if not config_path.exists():
+            ConfigManager().save_user_config(config)
+            console.print(f"[green]已创建默认配置文件[/green]")
+        console.print(f"请使用文本编辑器修改: {config_path}")
+        return
+    
+    # 处理 --undo
+    if args.undo:
+        if args.dir:
+            target_dir = Path(args.dir)
+            backup_manager = BackupManager(str(target_dir))
+            operations = backup_manager.list_operations()
+            if operations:
+                backup_manager.undo()
+            else:
+                console.print("[yellow]没有可撤销的操作[/yellow]")
+        else:
+            console.print("[red]请使用 --dir 指定项目目录[/red]")
+        return
+    
     # 初始化 LLM
-    api_key = os.getenv('OPENAI_API_KEY', 'sk-IA0OXgtva7EmahBVdzkCJgcJxnmo4ja6O0M0M146HniteI3m')
-    base_url = os.getenv('OPENAI_BASE_URL', 'https://api.moonshot.cn/v1')
+    if args.mock:
+        init_llm(use_mock=True)
+        console.print("[dim]✓ Mock LLM 客户端初始化成功 (测试模式)[/dim]")
+    else:
+        try:
+            init_llm()
+            if config.ui.verbose:
+                console.print("[dim]✓ LLM 客户端初始化成功[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]⚠️  LLM 初始化失败: {e}[/yellow]")
+            console.print("[yellow]将使用 Mock 模式继续...[/yellow]")
+            init_llm(use_mock=True)
     
-    try:
-        init_llm(api_key, base_url)
-        console.print("[dim]✓ LLM 客户端初始化成功[/dim]")
-    except Exception as e:
-        console.print(f"[red]✗ LLM 初始化失败: {e}[/red]")
-        sys.exit(1)
-    
-    cli = InteractiveNASCLI()
+    cli = InteractiveNASCLI(config)
     
     if args.dir:
         cli.target_dir = Path(args.dir).expanduser().resolve()
+        if not cli.target_dir.exists():
+            console.print(f"[red]目录不存在: {cli.target_dir}[/red]")
+            sys.exit(1)
         os.chdir(cli.target_dir)
+        cli.backup_manager = BackupManager(str(cli.target_dir))
     if args.entry:
         cli.entry_file = args.entry
     
@@ -823,10 +1039,16 @@ def main():
     except KeyboardInterrupt:
         console.print("\n[yellow]用户中断[/yellow]")
         sys.exit(0)
+    except NASCLIError as e:
+        console.print(f"\n[red]错误: {get_user_friendly_message(e)}[/red]")
+        if config.ui.verbose:
+            console.print(f"[dim]详情: {e}[/dim]")
+        sys.exit(1)
     except Exception as e:
         console.print(f"\n[red]错误: {e}[/red]")
-        import traceback
-        traceback.print_exc()
+        if config.ui.verbose:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 

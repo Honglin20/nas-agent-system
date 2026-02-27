@@ -1,6 +1,10 @@
 """
-NAS CLI - 交互式智能 NAS 寻优空间注入工具 (Real LLM Only)
-严禁使用规则模拟，所有分析必须通过真实 LLM
+NAS CLI - 交互式智能 NAS 寻优空间注入工具 v1.2.0
+增强版：
+- 智能模型识别
+- 跨文件参数修改
+- LLM 驱动的 Report 插入
+- 寻优空间张开
 """
 import os
 import sys
@@ -15,20 +19,26 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 from rich.syntax import Syntax
-from rich.prompt import Prompt, Confirm, IntPrompt
+from rich.prompt import Prompt, Confirm
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.live import Live
-from rich.layout import Layout
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import PathCompleter
 
 # 导入 MAS 核心
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from mas_core import NASOrchestrator, ScopeAgent, CentralRegistry, init_llm, get_llm_client, ModifierAgent
+from mas_core import (
+    NASOrchestrator, ScopeAgent, CentralRegistry, 
+    init_llm, get_llm_client, ModifierAgent,
+    # v1.2.0 新增
+    ModelDiscoveryAnalyzer,
+    CrossFileParameterModifier,
+    SearchSpaceExpander,
+    inject_report_to_project
+)
 
 console = Console()
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 @dataclass
@@ -43,10 +53,11 @@ class NASCandidate:
     reason: str = ""
     search_space: List[Any] = field(default_factory=list)
     selected: bool = True
+    is_config: bool = False  # v1.2.0: 是否是配置文件中的参数
 
 
 class InteractiveNASCLI:
-    """交互式 NAS CLI - 使用真实 LLM"""
+    """交互式 NAS CLI v1.2.0"""
     
     def __init__(self):
         self.current_dir = Path.cwd()
@@ -58,14 +69,23 @@ class InteractiveNASCLI:
         self.llm = None
         self.modifier_agent = ModifierAgent()
         
+        # v1.2.0 新增组件
+        self.model_discovery: Optional[ModelDiscoveryAnalyzer] = None
+        self.cross_file_modifier: Optional[CrossFileParameterModifier] = None
+        self.search_space_expander: Optional[SearchSpaceExpander] = None
+        
     def show_banner(self):
         """显示欢迎界面"""
-        banner = """
+        banner = f"""
 ╭────────────────────────────────────────────────────────────╮
 │                                                            │
-│   🧠 NAS-CLI 智能神经网络架构搜索工具 v1.1.0               │
+│   🧠 NAS-CLI 智能神经网络架构搜索工具 v{__version__}               │
 │                                                            │
-│   使用真实 LLM 自动识别代码中的寻优参数                    │
+│   增强功能:                                                │
+│   • 智能模型识别 (动态反射解析)                           │
+│   • 跨文件参数修改                                        │
+│   • LLM 驱动的 Report 插入                                │
+│   • 寻优空间张开                                          │
 │                                                            │
 ╰────────────────────────────────────────────────────────────╯
         """
@@ -100,6 +120,10 @@ class InteractiveNASCLI:
             if Confirm.ask("确认使用此目录?", default=True):
                 self.target_dir = target
                 os.chdir(target)
+                
+                # v1.2.0: 初始化跨文件修改器
+                self.cross_file_modifier = CrossFileParameterModifier(str(target))
+                
                 return target
     
     def show_directory_preview(self, path: Path):
@@ -179,8 +203,8 @@ class InteractiveNASCLI:
         return self.entry_file
     
     def scan_project(self):
-        """扫描项目 - 使用真实 LLM，带实时打印"""
-        self.console.print("\n[bold cyan]🔍 步骤 3: 扫描项目架构 (使用 LLM)[/bold cyan]\n")
+        """扫描项目 - v1.2.0 增强版"""
+        self.console.print("\n[bold cyan]🔍 步骤 3: 扫描项目架构[/bold cyan]\n")
         
         # 初始化 LLM
         self.llm = get_llm_client()
@@ -196,20 +220,22 @@ class InteractiveNASCLI:
         
         self.scanned_files = [str(f.relative_to(self.target_dir)) for f in py_files]
         
-        # 分析入口文件
-        self.console.print(f"[yellow]🤖 LLM 正在分析入口文件: {self.entry_file}[/yellow]")
-        entry_path = self.target_dir / self.entry_file
-        entry_agent = ScopeAgent(str(entry_path))
-        entry_agent.load_file()
-        entry_analysis = entry_agent.analyze()
-        
-        # 打印 LLM 识别的候选
-        entry_candidates = entry_analysis.get('nas_candidates', [])
-        if entry_candidates:
-            self.console.print(f"[green]✓ LLM 在入口文件发现 {len(entry_candidates)} 个候选:[/green]")
-            for cand in entry_candidates:
-                self.console.print(f"  • [cyan]{cand.get('name')}[/cyan] = [yellow]{cand.get('current_value')}[/yellow] - [dim]{cand.get('reason', '')[:50]}...[/dim]")
-        self.console.print()
+        # v1.2.0: 智能模型发现
+        if self.entry_file:
+            self.console.print("[yellow]🤖 正在进行智能模型发现...[/yellow]")
+            self.model_discovery = ModelDiscoveryAnalyzer(
+                str(self.target_dir), 
+                self.llm
+            )
+            entry_path = self.target_dir / self.entry_file
+            discovery_result = self.model_discovery.run_full_discovery(entry_path)
+            
+            if discovery_result.get("instantiated_model"):
+                model_info = discovery_result["instantiated_model"]
+                self.console.print(f"[green]✓ 识别到实际被实例化的模型:[/green]")
+                self.console.print(f"  • 模型: [cyan]{model_info.get('instantiated_model')}[/cyan]")
+                self.console.print(f"  • 变量: [cyan]{model_info.get('model_variable')}[/cyan]")
+                self.console.print(f"  • 置信度: [cyan]{model_info.get('confidence')}[/cyan]\n")
         
         # 分析所有文件
         all_agents = {}
@@ -226,12 +252,18 @@ class InteractiveNASCLI:
                 candidates = analysis.get('nas_candidates', [])
                 if candidates:
                     self.console.print(f"[green]  ↳ 发现 {len(candidates)} 个候选[/green]")
-                    for cand in candidates[:3]:  # 只显示前3个
+                    for cand in candidates[:3]:
                         self.console.print(f"    • [cyan]{cand.get('name')}[/cyan] = [yellow]{cand.get('current_value')}[/yellow]")
                     if len(candidates) > 3:
                         self.console.print(f"    ... 还有 {len(candidates) - 3} 个")
         
         self.console.print()
+        
+        # v1.2.0: 也查找配置文件中的参数
+        self.console.print("[yellow]📂 查找配置文件...[/yellow]")
+        config_candidates = self._scan_config_files()
+        if config_candidates:
+            self.console.print(f"[green]✓ 从配置文件发现 {len(config_candidates)} 个候选[/green]\n")
         
         # 收集所有候选
         self.console.print("[yellow]📊 收集所有 NAS 候选...[/yellow]")
@@ -258,7 +290,21 @@ class InteractiveNASCLI:
                 )
                 self.candidates.append(nas_cand)
         
-        # 使用 LLM 推荐哪些值得注入
+        # 添加配置文件候选
+        for cand in config_candidates:
+            self.candidates.append(NASCandidate(
+                name=cand['name'],
+                param_type=cand['type'],
+                current_value=cand['current_value'],
+                location=cand['source_file'],
+                line=0,
+                recommended=True,
+                reason=cand.get('reason', ''),
+                search_space=cand.get('search_space', [cand['current_value']]),
+                is_config=True
+            ))
+        
+        # 使用 LLM 推荐
         if self.candidates:
             self.console.print(f"[yellow]🤖 LLM 正在评估 {len(self.candidates)} 个候选的推荐优先级...[/yellow]")
             cand_dicts = [
@@ -281,9 +327,86 @@ class InteractiveNASCLI:
             self.console.print(f"[green]✓ LLM 推荐 {sum(1 for c in self.candidates if c.recommended)}/{len(self.candidates)} 个参数[/green]")
         
         self.console.print()
-        self.show_scan_results(entry_analysis, all_agents)
+        self.show_scan_results(all_agents, config_candidates)
     
-    def show_scan_results(self, entry_analysis: Dict, all_agents: Dict):
+    def _scan_config_files(self) -> List[Dict]:
+        """v1.2.0: 扫描配置文件"""
+        from mas_core.cross_file_modifier import ConfigFileHandler
+        
+        candidates = []
+        
+        # 查找 Python 配置文件
+        for config_file in self.target_dir.rglob("*_config.py"):
+            if any(part.startswith('.') for part in config_file.parts):
+                continue
+            
+            try:
+                config = ConfigFileHandler.load_config(config_file)
+                rel_path = str(config_file.relative_to(self.target_dir))
+                
+                # 递归查找数值参数
+                self._extract_from_dict(config, rel_path, candidates)
+            except Exception as e:
+                pass
+        
+        return candidates
+    
+    def _extract_from_dict(self, data: Dict, file_path: str, 
+                           candidates: List, prefix: str = ""):
+        """从字典中提取候选参数"""
+        nas_keywords = [
+            'lr', 'learning_rate', 'batch_size', 'epoch', 'dropout', 
+            'dim', 'hidden', 'layer', 'head', 'rate', 'weight_decay',
+            'momentum', 'beta', 'gamma', 'alpha'
+        ]
+        
+        for key, value in data.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            
+            if isinstance(value, dict):
+                self._extract_from_dict(value, file_path, candidates, full_key)
+            elif isinstance(value, (int, float)):
+                if any(kw in key.lower() for kw in nas_keywords):
+                    search_space = self._generate_search_space(value, key)
+                    candidates.append({
+                        'name': full_key,
+                        'type': 'value',
+                        'current_value': value,
+                        'source_file': file_path,
+                        'search_space': search_space,
+                        'reason': f'Configuration parameter: {key}'
+                    })
+            elif isinstance(value, str):
+                if key.lower() in ['activation', 'optimizer', 'norm', 'loss']:
+                    candidates.append({
+                        'name': full_key,
+                        'type': 'layer',
+                        'current_value': value,
+                        'source_file': file_path,
+                        'search_space': self._generate_layer_options(key, value),
+                        'reason': f'Layer/optimizer selection: {key}'
+                    })
+    
+    def _generate_search_space(self, value, name):
+        """生成搜索空间"""
+        if isinstance(value, (int, float)):
+            if 'lr' in name.lower() or 'rate' in name.lower():
+                if value < 1:
+                    return [value / 10, value, value * 10]
+            return [max(1, int(value / 2)), value, value * 2]
+        return [value]
+    
+    def _generate_layer_options(self, name, value):
+        """生成层选项"""
+        if 'activation' in name.lower():
+            return ['relu', 'sigmoid', 'tanh', 'gelu']
+        elif 'optimizer' in name.lower():
+            return ['Adam', 'SGD', 'RMSprop']
+        elif 'norm' in name.lower():
+            return ['batchnorm', 'layernorm']
+        return [value]
+    
+    def show_scan_results(self, all_agents: Dict, config_candidates: List):
         """显示扫描结果"""
         self.console.print("\n[bold green]✓ 扫描完成![/bold green]\n")
         
@@ -300,23 +423,24 @@ class InteractiveNASCLI:
         stats.add_column("指标", style="cyan")
         stats.add_column("数值", style="green")
         stats.add_row("Python 文件数", str(len(self.scanned_files)))
-        stats.add_row("类定义数", str(len(entry_analysis.get('classes', []))))
-        stats.add_row("函数定义数", str(len(entry_analysis.get('functions', []))))
-        stats.add_row("NAS 候选数", str(len(self.candidates)))
+        stats.add_row("代码候选数", str(len(self.candidates) - len(config_candidates)))
+        stats.add_row("配置候选数", str(len(config_candidates)))
+        stats.add_row("总候选数", str(len(self.candidates)))
         self.console.print(stats)
         
-        # 显示 LLM 识别的候选
+        # 显示候选
         if self.candidates:
-            self.console.print("\n[bold]LLM 识别的 NAS 候选:[/bold]")
+            self.console.print("\n[bold]识别的 NAS 候选:[/bold]")
             for cand in self.candidates[:5]:
                 rec = "⭐" if cand.recommended else ""
-                self.console.print(f"  • {cand.name} = {cand.current_value} {rec}")
+                config_mark = "⚙️ " if cand.is_config else ""
+                self.console.print(f"  • {config_mark}{cand.name} = {cand.current_value} {rec}")
                 self.console.print(f"    [dim]{cand.reason}[/dim]")
             if len(self.candidates) > 5:
                 self.console.print(f"  ... 还有 {len(self.candidates) - 5} 个")
     
     def select_candidates(self) -> bool:
-        """让用户选择候选参数 - 改进的交互"""
+        """让用户选择候选参数"""
         self.console.print("\n[bold cyan]⚙️  步骤 4: 配置 NAS 寻优空间[/bold cyan]\n")
         
         if not self.candidates:
@@ -330,22 +454,23 @@ class InteractiveNASCLI:
         table.add_column("当前值", style="yellow")
         table.add_column("类型", style="blue")
         table.add_column("位置", style="dim")
-        table.add_column("LLM推荐", style="magenta")
+        table.add_column("来源", style="magenta")
         
         for i, cand in enumerate(self.candidates, 1):
+            source = "⚙️ 配置" if cand.is_config else "🐍 代码"
             rec_mark = "⭐ 推荐" if cand.recommended else ""
             table.add_row(
                 str(i),
                 cand.name,
                 str(cand.current_value),
                 cand.param_type,
-                f"{cand.location}:{cand.line}",
-                rec_mark
+                cand.location,
+                f"{source} {rec_mark}"
             )
         
         self.console.print(table)
         
-        # 改进的选择方式
+        # 选择方式
         self.console.print("\n[bold]选择方式:[/bold]")
         self.console.print("  [1] 使用 LLM 推荐参数 (带⭐标记)")
         self.console.print("  [2] 全选所有参数")
@@ -376,7 +501,7 @@ class InteractiveNASCLI:
         selected = [c for c in self.candidates if c.selected]
         self.console.print(f"\n[green]✓ 已选择 {len(selected)}/{len(self.candidates)} 个参数[/green]")
         
-        # 让用户自定义搜索空间
+        # 自定义搜索空间
         if selected and Confirm.ask("\n是否自定义寻优空间?", default=False):
             self._customize_search_space(selected)
         
@@ -407,10 +532,8 @@ class InteractiveNASCLI:
             custom = Prompt.ask("  自定义搜索空间 (回车跳过)", default="")
             if custom.strip():
                 try:
-                    # 尝试解析为列表
                     if ',' in custom:
                         values = [v.strip() for v in custom.split(',')]
-                        # 尝试转换为数字
                         parsed = []
                         for v in values:
                             try:
@@ -423,7 +546,6 @@ class InteractiveNASCLI:
                         cand.search_space = parsed
                         self.console.print(f"  [green]✓ 已设置为: {parsed}[/green]")
                     else:
-                        # 单个值
                         try:
                             if '.' in custom:
                                 cand.search_space = [float(custom)]
@@ -452,7 +574,11 @@ class InteractiveNASCLI:
             
             for cand in cands:
                 before = f"{cand.name} = {cand.current_value}"
-                after = f"{cand.name} = ValueSpace({cand.search_space})"
+                
+                if cand.param_type == 'value':
+                    after = f"{cand.name} = ValueSpace({cand.search_space})"
+                else:
+                    after = f"{cand.name} = LayerSpace({cand.search_space})"
                 
                 self.console.print(f"  [red]- {before}[/red]")
                 self.console.print(f"  [green]+ {after}[/green]")
@@ -460,15 +586,36 @@ class InteractiveNASCLI:
         
         return Confirm.ask("\n确认执行以上修改?", default=True)
     
+    def create_backup(self):
+        """创建备份"""
+        self.console.print("\n[bold cyan]💾 创建备份...[/bold cyan]")
+        
+        backup_dir = self.target_dir / ".nas_backup"
+        
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        
+        backup_dir.mkdir(exist_ok=True)
+        
+        # 备份所有 Python 文件
+        for py_file in self.target_dir.rglob("*.py"):
+            if any(part.startswith('.') or part in ['__pycache__', 'venv'] 
+                   for part in py_file.parts):
+                continue
+            
+            rel_path = py_file.relative_to(self.target_dir)
+            backup_path = backup_dir / rel_path
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(py_file, backup_path)
+        
+        self.console.print(f"[green]✓ 备份已创建: {backup_dir}[/green]")
+        return backup_dir
+    
     def apply_modifications(self):
-        """应用修改 - 修复：真正修改文件"""
+        """应用修改 - v1.2.0 增强版"""
         self.console.print("\n[bold cyan]🔧 步骤 6: 应用修改[/bold cyan]\n")
         
         selected = [c for c in self.candidates if c.selected]
-        
-        # 创建备份目录
-        backup_dir = self.target_dir / ".nas_backup"
-        backup_dir.mkdir(exist_ok=True)
         
         # 按文件分组
         by_file: Dict[str, List[NASCandidate]] = {}
@@ -486,59 +633,107 @@ class InteractiveNASCLI:
             for file_path, cands in by_file.items():
                 full_path = self.target_dir / file_path
                 
-                # 创建备份
-                backup_path = backup_dir / f"{file_path}.bak"
-                backup_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    shutil.copy2(full_path, backup_path)
-                    self.console.print(f"[dim]  📦 已备份: {file_path}[/dim]")
-                except Exception as e:
-                    self.console.print(f"[red]  ⚠️ 备份失败 {file_path}: {e}[/red]")
+                # 分离代码修改和配置修改
+                code_mods = [c for c in cands if not c.is_config]
+                config_mods = [c for c in cands if c.is_config]
                 
-                # 准备修改列表
-                modifications = []
-                for cand in cands:
-                    if cand.param_type == 'value':
-                        mod = {
-                            'type': 'value_space',
-                            'target': cand.name,
-                            'search_space': cand.search_space,
-                            'line': cand.line
-                        }
-                    elif cand.param_type == 'layer':
-                        mod = {
-                            'type': 'layer_space',
-                            'target': cand.name,
-                            'layer_options': [str(v) for v in cand.search_space],
-                            'line': cand.line
-                        }
-                    else:
-                        continue
-                    modifications.append(mod)
+                success = True
                 
-                # 使用 ModifierAgent 应用修改
-                try:
-                    result = self.modifier_agent.apply_modifications(
-                        str(full_path),
-                        modifications
-                    )
-                    if result:
-                        self.console.print(f"[green]  ✓ 已修改: {file_path}[/green]")
-                        success_count += 1
-                    else:
-                        self.console.print(f"[red]  ✗ 修改失败: {file_path}[/red]")
-                        fail_count += 1
-                except Exception as e:
-                    self.console.print(f"[red]  ✗ 修改失败 {file_path}: {e}[/red]")
+                # 应用代码修改
+                if code_mods:
+                    modifications = []
+                    for cand in code_mods:
+                        if cand.param_type == 'value':
+                            mod = {
+                                'type': 'value_space',
+                                'target': cand.name,
+                                'search_space': cand.search_space,
+                                'line': cand.line
+                            }
+                        else:
+                            mod = {
+                                'type': 'layer_space',
+                                'target': cand.name,
+                                'layer_options': [str(v) for v in cand.search_space],
+                                'line': cand.line
+                            }
+                        modifications.append(mod)
+                    
+                    try:
+                        if not self.modifier_agent.apply_modifications(
+                            str(full_path), modifications
+                        ):
+                            success = False
+                    except Exception as e:
+                        self.console.print(f"[red]  ✗ 修改失败 {file_path}: {e}[/red]")
+                        success = False
+                
+                # 应用配置修改
+                for cand in config_mods:
+                    try:
+                        from mas_core.cross_file_modifier import ConfigFileHandler
+                        key_path = cand.name.split('.')
+                        
+                        if cand.param_type == 'value':
+                            new_value = f"ValueSpace({cand.search_space})"
+                        else:
+                            new_value = f"LayerSpace({cand.search_space})"
+                        
+                        if not ConfigFileHandler.modify_config_value(
+                            full_path, key_path, new_value
+                        ):
+                            success = False
+                    except Exception as e:
+                        self.console.print(f"[red]  ✗ 配置修改失败 {cand.name}: {e}[/red]")
+                        success = False
+                
+                if success:
+                    success_count += 1
+                    self.console.print(f"[green]  ✓ 已修改: {file_path}[/green]")
+                else:
                     fail_count += 1
                 
                 progress.advance(task)
         
         self.console.print(f"\n[green]✓ 修改完成![/green] 成功: {success_count}, 失败: {fail_count}")
-        self.console.print(f"[dim]备份保存在: {backup_dir}[/dim]")
+    
+    def run_search_space_expansion(self):
+        """v1.2.0: 运行寻优空间张开"""
+        self.console.print("\n[bold cyan]🌐 步骤 7: 寻优空间张开[/bold cyan]\n")
+        
+        self.search_space_expander = SearchSpaceExpander(self.llm)
+        expanded_files = self.search_space_expander.expand_project(str(self.target_dir))
+        
+        if expanded_files:
+            self.console.print(f"[green]✓ 已张开 {len(expanded_files)} 个文件:[/green]")
+            for f in expanded_files:
+                self.console.print(f"  • {f}")
+        else:
+            self.console.print("[dim]未发现需要张开的条件层选择[/dim]")
+    
+    def run_report_injection(self):
+        """v1.2.0: 运行 Report 注入"""
+        self.console.print("\n[bold cyan]📊 步骤 8: Report 注入[/bold cyan]\n")
+        
+        if not self.entry_file:
+            self.console.print("[yellow]⚠️  未指定入口文件，跳过 report 注入[/yellow]")
+            return
+        
+        modified_files = inject_report_to_project(
+            str(self.target_dir),
+            self.entry_file,
+            self.llm
+        )
+        
+        if modified_files:
+            self.console.print(f"[green]✓ 已注入 report 到 {len(modified_files)} 个文件:[/green]")
+            for f in modified_files:
+                self.console.print(f"  • {f}")
+        else:
+            self.console.print("[dim]未发现需要注入 report 的文件[/dim]")
     
     def run(self):
-        """运行完整流程"""
+        """运行完整流程 v1.2.0"""
         self.show_banner()
         
         if self.target_dir is None:
@@ -566,7 +761,17 @@ class InteractiveNASCLI:
             self.console.print("[yellow]已取消修改[/yellow]")
             return
         
+        # 创建备份
+        self.create_backup()
+        
+        # 应用修改
         self.apply_modifications()
+        
+        # v1.2.0: 寻优空间张开
+        self.run_search_space_expansion()
+        
+        # v1.2.0: Report 注入
+        self.run_report_injection()
         
         self.console.print("\n" + "="*60)
         self.console.print("[bold green]🎉 NAS 寻优空间注入完成![/bold green]")
@@ -576,7 +781,7 @@ class InteractiveNASCLI:
 def main():
     """CLI 入口"""
     parser = argparse.ArgumentParser(
-        description="NAS-CLI 智能神经网络架构搜索工具 (Real LLM)",
+        description="NAS-CLI 智能神经网络架构搜索工具 v1.2.0 (Enhanced)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:

@@ -1,17 +1,21 @@
 """
-MAS Core - LLM Integration (Real LLM Only)
-严禁使用规则模拟，所有分析必须通过真实 LLM
+MAS Core - LLM Integration (v1.2.0 Enhanced)
+增强版 LLM 客户端，支持：
+- 智能模型识别（解析动态反射）
+- 代码片段分析
+- LLM 驱动的 report 插入
+- 寻优空间张开
 """
 import os
 import re
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import openai
 
 
 class LLMClient:
     """
-    LLM 客户端 - 所有分析必须通过真实 LLM
+    增强版 LLM 客户端 - v1.2.0
     """
     
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
@@ -23,14 +27,11 @@ class LLMClient:
             base_url=self.base_url
         )
         
-        # 可用模型列表
         self.models = ["moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"]
         self.current_model = None
     
-    def _call_llm(self, prompt: str, system_msg: str = "") -> str:
-        """
-        调用真实 LLM
-        """
+    def _call_llm(self, prompt: str, system_msg: str = "", temperature: float = 0.2) -> str:
+        """调用真实 LLM"""
         last_error = None
         
         for model in self.models:
@@ -43,7 +44,7 @@ class LLMClient:
                 response = self.client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    temperature=0.2
+                    temperature=temperature
                 )
                 
                 self.current_model = model
@@ -55,10 +56,35 @@ class LLMClient:
         
         raise Exception(f"All LLM models failed. Last error: {last_error}")
     
+    def _extract_json(self, content: str) -> Optional[Dict]:
+        """从 LLM 响应中提取 JSON"""
+        # 尝试1: 直接解析
+        try:
+            return json.loads(content)
+        except:
+            pass
+        
+        # 尝试2: 从代码块提取
+        try:
+            match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', content)
+            if match:
+                return json.loads(match.group(1))
+        except:
+            pass
+        
+        # 尝试3: 从任意 JSON 对象提取
+        try:
+            match = re.search(r'(\{[\s\S]*"[\w_]+"[\s\S]*\})', content)
+            if match:
+                return json.loads(match.group(1))
+        except:
+            pass
+        
+        return None
+    
     def analyze_code_for_nas(self, code: str, file_path: str = "") -> List[Dict[str, Any]]:
         """
         使用真实 LLM 分析代码，识别 NAS 候选参数
-        严禁使用规则模拟
         """
         prompt = f"""你是一个神经网络架构搜索（NAS）专家。请分析以下 Python 代码，识别所有可以寻优的参数。
 
@@ -81,7 +107,7 @@ class LLMClient:
 - reason: 为什么这个参数值得寻优
 - line: 大概的行号（如果能在代码中定位）
 
-必须以 JSON 格式返回，格式如下（注意：不要包含换行，保持在一行内）:
+必须以 JSON 格式返回，格式如下:
 {{"candidates": [{{"name": "learning_rate", "type": "value", "current_value": "0.001", "suggested_space": "ValueSpace([1e-4, 1e-3, 1e-2])", "reason": "学习率对模型收敛至关重要", "line": 15}}]}}
 
 重要：返回的 JSON 必须在一行内，不要格式化换行。"""
@@ -92,59 +118,200 @@ class LLMClient:
                 "你是一个专业的神经网络架构搜索（NAS）专家，擅长识别深度学习代码中的可寻优参数。"
             )
             
-            # 多层容错 JSON 解析
-            return self._extract_candidates(content)
+            result = self._extract_json(content)
+            if result and "candidates" in result:
+                return result["candidates"]
+            if isinstance(result, list):
+                return result
+            return []
         
         except Exception as e:
             print(f"[LLMClient] Error analyzing code: {e}")
             return []
     
-    def _extract_candidates(self, content: str) -> List[Dict]:
-        """多层容错提取候选列表"""
-        # 尝试1: 直接解析
-        try:
-            result = json.loads(content)
-            if isinstance(result, dict) and "candidates" in result:
-                return result["candidates"]
-            if isinstance(result, list):
-                return result
-        except:
-            pass
+    def analyze_code_snippet_for_model_instantiation(self, code_snippet: str, 
+                                                      available_models: List[str]) -> Dict[str, Any]:
+        """
+        分析代码片段，识别实际被实例化的模型
         
-        # 尝试2: 从代码块提取对象
-        try:
-            match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', content)
-            if match:
-                result = json.loads(match.group(1))
-                if isinstance(result, dict) and "candidates" in result:
-                    return result["candidates"]
-        except:
-            pass
+        Args:
+            code_snippet: 代码片段（包含 model 实例化相关代码）
+            available_models: 可用的模型类名列表
+            
+        Returns:
+            Dict: {
+                "instantiated_model": "模型类名",
+                "instantiation_line": 行号,
+                "model_variable": "模型变量名",
+                "confidence": "high/medium/low"
+            }
+        """
+        prompt = f"""你是一个 Python 代码分析专家。请分析以下代码片段，识别实际被实例化的模型类。
+
+可用模型类: {available_models}
+
+代码片段:
+```python
+{code_snippet}
+```
+
+请分析:
+1. 哪个模型类被实际实例化了？（通过 getattr 或直接调用）
+2. 实例化发生在哪一行？
+3. 模型被赋值给哪个变量？
+4. 你的置信度如何？
+
+必须以 JSON 格式返回:
+{{
+    "instantiated_model": "模型类名",
+    "instantiation_line": 行号,
+    "model_variable": "模型变量名",
+    "confidence": "high/medium/low",
+    "reasoning": "分析理由"
+}}
+
+只返回 JSON，不要其他内容。"""
         
-        # 尝试3: 直接找 candidates 数组（包含换行）
         try:
-            match = re.search(r'"candidates"\s*:\s*(\[[\s\S]*?\])\s*[,}]', content)
-            if match:
-                return json.loads(match.group(1))
-        except:
-            pass
+            content = self._call_llm(prompt, "你是一个 Python 代码分析专家，擅长解析动态反射和模型实例化。")
+            result = self._extract_json(content)
+            return result or {}
+        except Exception as e:
+            print(f"[LLMClient] Error analyzing model instantiation: {e}")
+            return {}
+    
+    def find_training_function_and_metrics(self, code_snippet: str) -> Dict[str, Any]:
+        """
+        分析代码片段，找到训练函数和 metrics
         
-        # 尝试4: 找任意 JSON 对象数组
+        Args:
+            code_snippet: 训练相关的代码片段
+            
+        Returns:
+            Dict: {
+                "training_function": "函数名或类名",
+                "function_type": "function/class",
+                "metrics": {
+                    "loss": "loss变量名",
+                    "accuracy": "accuracy变量名",
+                    ...
+                },
+                "model_variable": "模型变量名",
+                "insertion_point": "插入位置描述"
+            }
+        """
+        prompt = f"""你是一个深度学习代码分析专家。请分析以下代码片段，找到训练函数/类和关键指标。
+
+代码片段:
+```python
+{code_snippet}
+```
+
+请分析:
+1. 训练函数或类是什么？
+2. 有哪些关键指标（loss, accuracy, reward 等）？
+3. 模型变量名是什么？
+4. 在哪里应该插入 report(model=model, ...) 调用？
+
+必须以 JSON 格式返回:
+{{
+    "training_function": "函数名或类名",
+    "function_type": "function/class",
+    "metrics": {{
+        "loss": "loss变量名",
+        "accuracy": "accuracy变量名"
+    }},
+    "model_variable": "模型变量名",
+    "insertion_point": "每个 epoch 结束后，在打印日志之前"
+}}
+
+只返回 JSON，不要其他内容。"""
+        
         try:
-            match = re.search(r'(\[[\s\S]*"name"[\s\S]*\])', content)
-            if match:
-                return json.loads(match.group(1))
-        except:
-            pass
+            content = self._call_llm(prompt, "你是一个深度学习代码分析专家，擅长识别训练循环和指标。")
+            result = self._extract_json(content)
+            return result or {}
+        except Exception as e:
+            print(f"[LLMClient] Error finding training function: {e}")
+            return {}
+    
+    def analyze_conditional_layers(self, code_snippet: str) -> List[Dict[str, Any]]:
+        """
+        分析条件层代码（如 if activation == 'relu': self.act = nn.ReLU()）
+        识别可以转换为 LayerSpace 的条件分支
         
-        print(f"[LLMClient] Warning: JSON parse failed")
-        print(f"[LLMClient] Content preview: {content[:500]}")
-        return []
+        Args:
+            code_snippet: 包含条件层选择的代码片段
+            
+        Returns:
+            List[Dict]: 每个条件层的信息
+            [{
+                "variable_name": "self.act",
+                "condition_variable": "activation",
+                "options": ["nn.ReLU()", "nn.Sigmoid()", "nn.Tanh()"],
+                "line_start": 10,
+                "line_end": 20
+            }]
+        """
+        prompt = f"""你是一个神经网络架构搜索专家。请分析以下代码片段，识别可以转换为 LayerSpace 的条件层选择。
+
+代码片段:
+```python
+{code_snippet}
+```
+
+请识别所有类似以下的模式:
+- if activation == 'relu': self.act = nn.ReLU()
+- if norm_type == 'batchnorm': self.norm = nn.BatchNorm1d(...)
+- 等等
+
+对于每个条件层选择，提供:
+- variable_name: 被赋值的变量名
+- condition_variable: 条件判断的变量名
+- options: 所有可能的选项列表
+- line_start: 开始行号
+- line_end: 结束行号
+
+必须以 JSON 格式返回:
+{{
+    "conditional_layers": [
+        {{
+            "variable_name": "self.act",
+            "condition_variable": "activation",
+            "options": ["nn.ReLU()", "nn.Sigmoid()", "nn.Tanh()"],
+            "line_start": 10,
+            "line_end": 16
+        }}
+    ]
+}}
+
+只返回 JSON，不要其他内容。"""
+        
+        try:
+            content = self._call_llm(prompt, "你是一个神经网络架构搜索专家，擅长识别条件层选择模式。")
+            result = self._extract_json(content)
+            return result.get("conditional_layers", []) if result else []
+        except Exception as e:
+            print(f"[LLMClient] Error analyzing conditional layers: {e}")
+            return []
+    
+    def generate_layer_space_replacement(self, variable_name: str, 
+                                          options: List[str]) -> str:
+        """
+        生成 LayerSpace 替换代码
+        
+        Args:
+            variable_name: 变量名
+            options: 层选项列表
+            
+        Returns:
+            str: LayerSpace 代码字符串
+        """
+        formatted_options = [f'"{opt}"' if not opt.startswith('nn.') else opt for opt in options]
+        return f"LayerSpace([{', '.join(formatted_options)}])"
     
     def resolve_dynamic_reference(self, code: str, variable_name: str) -> str:
-        """
-        使用真实 LLM 解析动态引用（如 getattr）
-        """
+        """使用真实 LLM 解析动态引用（如 getattr）"""
         prompt = f"""请分析以下 Python 代码，解析动态引用的实际值。
 
 代码:
@@ -168,9 +335,7 @@ class LLMClient:
     
     def generate_search_space(self, param_name: str, current_value: Any, 
                               param_type: str) -> List[Any]:
-        """
-        使用真实 LLM 生成搜索空间
-        """
+        """使用真实 LLM 生成搜索空间"""
         prompt = f"""你是一个 NAS 专家。请为以下参数生成合适的搜索空间。
 
 参数名: {param_name}
@@ -191,15 +356,13 @@ class LLMClient:
         
         try:
             content = self._call_llm(prompt)
-            result = json.loads(content)
-            return result.get("search_space", [current_value])
+            result = self._extract_json(content)
+            return result.get("search_space", [current_value]) if result else [current_value]
         except:
             return [current_value]
     
     def recommend_injection(self, candidates: List[Dict]) -> List[Dict]:
-        """
-        使用真实 LLM 推荐哪些参数值得注入
-        """
+        """使用真实 LLM 推荐哪些参数值得注入"""
         candidates_str = json.dumps(candidates, indent=2, ensure_ascii=False)
         
         prompt = f"""你是一个 NAS 专家。请分析以下候选参数，推荐哪些最值得进行 NAS 寻优。
@@ -227,8 +390,8 @@ class LLMClient:
         
         try:
             content = self._call_llm(prompt)
-            result = json.loads(content)
-            return result.get("recommendations", [])
+            result = self._extract_json(content)
+            return result.get("recommendations", []) if result else []
         except:
             return []
 

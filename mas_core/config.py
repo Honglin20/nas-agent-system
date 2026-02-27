@@ -1,7 +1,8 @@
 """
-NAS CLI Configuration System (v1.3.1 Enhanced)
-配置文件管理系统 - 增强版
+NAS CLI Configuration System (v1.4.0)
+配置文件管理系统 - v1.4.0
 - 添加代理配置支持
+- 添加参数过滤配置
 """
 import os
 import yaml
@@ -13,7 +14,7 @@ from dataclasses import dataclass, field, asdict
 
 @dataclass
 class ProxyConfig:
-    """v1.3.1: 代理配置"""
+    """v1.4.0: 代理配置"""
     http_proxy: str = ""
     https_proxy: str = ""
     
@@ -81,7 +82,36 @@ class AnalysisConfig:
 
 @dataclass
 class NASConfig:
-    """NAS 配置"""
+    """
+    NAS 配置 - v1.4.0
+    更新参数过滤配置
+    """
+    # v1.4.0: 推荐的模型结构参数
+    recommended_params: List[str] = field(default_factory=lambda: [
+        'd_model', 'hidden_dim', 'embed_dim', 'embedding_dim',
+        'num_layers', 'n_layers', 'depth', 'num_blocks',
+        'num_heads', 'n_heads', 'nhead',
+        'dropout', 'attention_dropout', 'hidden_dropout_prob',
+        'dim_feedforward', 'ffn_dim', 'ff_dim', 'intermediate_size',
+        'activation', 'hidden_act',
+        'norm_type', 'normalization', 'layer_norm_eps',
+        'max_len', 'max_length', 'max_position_embeddings',
+        'kernel_size', 'filter_size', 'num_filters',
+    ])
+    
+    # v1.4.0: 排除的训练参数
+    excluded_params: List[str] = field(default_factory=lambda: [
+        'lr', 'learning_rate', 'learning-rate',
+        'optimizer', 'optim',
+        'num_classes', 'num_classes', 'n_classes', 'output_dim',
+        'batch_size', 'batchsize', 'batch-size',
+        'epoch', 'epochs', 'num_epochs', 'num_epochs',
+        'weight_decay', 'weight_decay',
+        'momentum', 'beta1', 'beta2',
+        'warmup_steps', 'warmup_epochs',
+    ])
+    
+    # 保留旧配置以兼容
     value_keywords: List[str] = field(default_factory=lambda: [
         'lr', 'learning_rate', 'batch_size', 'epoch', 'dropout',
         'dim', 'hidden', 'layer', 'head', 'rate', 'weight_decay',
@@ -97,22 +127,25 @@ class NASConfig:
         'dropout': [0.1, 0.2, 0.3, 0.4, 0.5],
         'num_layers': [1, 2, 3, 4, 6],
         'hidden_dim': [64, 128, 256, 512, 1024],
+        'd_model': [128, 256, 512],
+        'num_heads': [4, 8, 16],
+        'dim_feedforward': [512, 1024, 2048],
     })
 
 
 @dataclass
 class Config:
-    """完整配置 - v1.3.1"""
+    """完整配置 - v1.4.0"""
     llm: LLMConfig = field(default_factory=LLMConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     nas: NASConfig = field(default_factory=NASConfig)
-    proxy: ProxyConfig = field(default_factory=ProxyConfig)  # v1.3.1: 新增代理配置
-    version: str = "1.3.1"
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
+    version: str = "1.4.0"
 
 
 class ConfigManager:
-    """配置管理器 - v1.3.1 增强版"""
+    """配置管理器 - v1.4.0"""
     
     DEFAULT_CONFIG_DIR = Path.home() / ".nas-cli"
     DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.yaml"
@@ -175,7 +208,7 @@ class ConfigManager:
                 if hasattr(base.nas, key):
                     setattr(base.nas, key, value)
         
-        # v1.3.1: 合并代理配置
+        # v1.4.0: 合并代理配置
         if 'proxy' in updates:
             for key, value in updates['proxy'].items():
                 if hasattr(base.proxy, key):
@@ -201,7 +234,7 @@ class ConfigManager:
         if os.getenv('NAS_CLI_LANGUAGE'):
             config.ui.language = os.getenv('NAS_CLI_LANGUAGE')
         
-        # v1.3.1: 代理配置（环境变量优先）
+        # v1.4.0: 代理配置（环境变量优先）
         http_proxy = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
         https_proxy = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
         
@@ -244,10 +277,12 @@ class ConfigManager:
                     'cache_ttl': config.analysis.cache_ttl,
                 },
                 'nas': {
+                    'recommended_params': config.nas.recommended_params,
+                    'excluded_params': config.nas.excluded_params,
                     'value_keywords': config.nas.value_keywords,
                     'layer_keywords': config.nas.layer_keywords,
                 },
-                # v1.3.1: 代理配置
+                # v1.4.0: 代理配置
                 'proxy': {
                     'http_proxy': config.proxy.http_proxy,
                     'https_proxy': config.proxy.https_proxy,

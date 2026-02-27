@@ -1,4 +1,4 @@
-# NAS-CLI v1.3.0
+# NAS-CLI v1.4.0
 
 智能神经网络架构搜索（NAS）寻优空间注入 CLI 工具。
 
@@ -117,7 +117,7 @@ nas-agent test --level 3
 配置文件位于 `~/.nas-cli/config.yaml`：
 
 ```yaml
-version: "1.3.0"
+version: "1.4.0"
 
 llm:
   base_url: "https://api.openai.com/v1"
@@ -249,6 +249,15 @@ nas-cli --dir target_projects/level3 --entry main.py
 ```
 
 ## 版本历史
+
+### v1.4.0 (2026-02-27)
+- ✨ 参数过滤：只推荐模型超参和结构参数
+- ✨ 不推荐的参数：lr、optimizer、num_classes、batch_size、epoch 等训练参数
+- ✨ 模型修改范围限制：只修改 backbone 主模型的 __init__ 方法
+- ✨ Level 4 重构：使用 YAML 配置文件，模型只接受 config 参数
+- ✨ 回退功能修复：修复 undo 逻辑，添加详细日志
+- ✨ 修改生效验证：确保 ValueSpace/LayerSpace 正确替换
+- ✨ 智能参数识别：d_model、num_layers、num_heads、dropout 等
 
 ### v1.3.0 (2026-02-27)
 - ✨ 完善的错误处理系统，分类错误码

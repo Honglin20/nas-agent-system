@@ -1,9 +1,11 @@
 """
-NAS CLI Backup and Undo System (v1.3.1 Enhanced)
-备份和撤销系统 - 增强版
+NAS CLI Backup and Undo System (v1.4.0 Fixed)
+备份和撤销系统 - 修复版
 - 支持备份描述
 - 备份列表展示
 - 快速切换备份
+- 修复 undo 逻辑
+- 添加详细日志
 """
 import os
 import shutil
@@ -70,11 +72,11 @@ class Operation:
 
 
 class BackupManager:
-    """备份管理器 - v1.3.1 增强版"""
+    """备份管理器 - v1.4.0 修复版"""
     
     BACKUP_DIR_NAME = ".nas_backup"
     HISTORY_FILE = "history.json"
-    MAX_BACKUPS = 20  # v1.3.1: 增加最大备份数量
+    MAX_BACKUPS = 20
     
     def __init__(self, project_path: str):
         self.project_path = Path(project_path)
@@ -82,6 +84,9 @@ class BackupManager:
         self.history_file = self.backup_dir / self.HISTORY_FILE
         self._operations: List[Operation] = []
         self._load_history()
+        
+        print(f"[BackupManager v1.4.0] Initialized for project: {project_path}")
+        print(f"[BackupManager] Backup directory: {self.backup_dir}")
     
     def _load_history(self):
         """加载操作历史"""
@@ -90,9 +95,13 @@ class BackupManager:
                 with open(self.history_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self._operations = [Operation.from_dict(op) for op in data.get('operations', [])]
+                print(f"[BackupManager] Loaded {len(self._operations)} operations from history")
             except Exception as e:
                 print(f"[BackupManager] Warning: Failed to load history: {e}")
                 self._operations = []
+        else:
+            print(f"[BackupManager] No history file found, starting fresh")
+            self._operations = []
     
     def _save_history(self):
         """保存操作历史"""
@@ -104,6 +113,7 @@ class BackupManager:
             }
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            print(f"[BackupManager] Saved history with {len(self._operations)} operations")
         except Exception as e:
             print(f"[BackupManager] Warning: Failed to save history: {e}")
     
@@ -117,7 +127,7 @@ class BackupManager:
     
     def create_backup(self, description: str = "", metadata: Optional[Dict] = None) -> Operation:
         """
-        创建项目备份 - v1.3.1 增强版
+        创建项目备份 - v1.4.0 修复版
         
         Args:
             description: 备份描述（必填，用于识别备份内容）
@@ -129,9 +139,12 @@ class BackupManager:
         operation_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:12]
         timestamp = time.time()
         
-        # v1.3.1: 如果没有描述，自动生成一个
+        # v1.4.0: 如果没有描述，自动生成一个
         if not description:
             description = f"Backup at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        print(f"[BackupManager] Creating backup: {operation_id}")
+        print(f"[BackupManager] Description: {description}")
         
         operation = Operation(
             id=operation_id,
@@ -144,8 +157,10 @@ class BackupManager:
         # 创建备份目录
         backup_subdir = self.backup_dir / operation_id
         backup_subdir.mkdir(parents=True, exist_ok=True)
+        print(f"[BackupManager] Backup directory: {backup_subdir}")
         
         # 备份所有 Python 文件
+        backed_up_count = 0
         for py_file in self.project_path.rglob("*.py"):
             # 跳过备份目录自身
             if self.BACKUP_DIR_NAME in py_file.parts:
@@ -173,9 +188,36 @@ class BackupManager:
                     change_type="backup"
                 )
                 operation.changes.append(change)
+                backed_up_count += 1
                 
             except Exception as e:
                 print(f"[BackupManager] Warning: Failed to backup {py_file}: {e}")
+        
+        # 备份 YAML 配置文件
+        for yaml_file in self.project_path.rglob("*.yaml"):
+            if self.BACKUP_DIR_NAME in yaml_file.parts:
+                continue
+            if any(part.startswith('.') for part in yaml_file.parts):
+                continue
+            
+            try:
+                rel_path = yaml_file.relative_to(self.project_path)
+                backup_path = backup_subdir / rel_path
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(yaml_file, backup_path)
+                
+                original_hash = self._compute_hash(yaml_file)
+                change = FileChange(
+                    file_path=str(rel_path),
+                    original_hash=original_hash,
+                    modified_hash=original_hash,
+                    backup_path=str(backup_path),
+                    change_type="backup"
+                )
+                operation.changes.append(change)
+                backed_up_count += 1
+            except Exception as e:
+                print(f"[BackupManager] Warning: Failed to backup {yaml_file}: {e}")
         
         # 保存操作记录
         self._operations.append(operation)
@@ -183,8 +225,7 @@ class BackupManager:
         self._save_history()
         
         print(f"[BackupManager] Created backup: {operation_id}")
-        print(f"[BackupManager] Description: {description}")
-        print(f"[BackupManager] Backed up {len(operation.changes)} files")
+        print(f"[BackupManager] Backed up {backed_up_count} files")
         
         return operation
     
@@ -221,6 +262,7 @@ class BackupManager:
                 if operation:
                     operation.changes.append(change)
                     self._save_history()
+                    print(f"[BackupManager] Recorded modification for {rel_path} in operation {operation_id}")
                     return True
             
             # 创建新操作
@@ -233,6 +275,7 @@ class BackupManager:
             )
             self._operations.append(operation)
             self._save_history()
+            print(f"[BackupManager] Created new operation for modification: {operation.id}")
             
             return True
             
@@ -242,7 +285,7 @@ class BackupManager:
     
     def undo(self, operation_id: Optional[str] = None) -> bool:
         """
-        撤销操作
+        撤销操作 - v1.4.0 修复版
         
         Args:
             operation_id: 要撤销的操作ID，None 表示撤销最后一次操作
@@ -250,6 +293,8 @@ class BackupManager:
         Returns:
             bool: 是否成功
         """
+        print(f"[BackupManager] Starting undo operation...")
+        
         if not self._operations:
             print("[BackupManager] No operations to undo")
             return False
@@ -261,31 +306,55 @@ class BackupManager:
                 print(f"[BackupManager] Operation not found: {operation_id}")
                 return False
         else:
-            operation = self._operations[-1]
+            # 找到最后一个未撤销的操作
+            operation = None
+            for op in reversed(self._operations):
+                if not op.metadata.get('undone', False):
+                    operation = op
+                    break
+            
+            if not operation:
+                print("[BackupManager] No operations to undo (all already undone)")
+                return False
         
         print(f"[BackupManager] Undoing operation: {operation.id}")
         print(f"[BackupManager] Description: {operation.description}")
+        print(f"[BackupManager] Target directory: {operation.target_dir}")
+        
+        # 验证备份目录存在
+        backup_subdir = self.backup_dir / operation.id
+        if not backup_subdir.exists():
+            print(f"[BackupManager] ERROR: Backup directory not found: {backup_subdir}")
+            return False
+        
+        print(f"[BackupManager] Backup directory: {backup_subdir}")
         
         success_count = 0
         fail_count = 0
         
         for change in operation.changes:
             file_path = self.project_path / change.file_path
+            backup_file = backup_subdir / change.file_path
             
-            if change.change_type == "modify":
-                # 从备份恢复
-                backup_path = self.backup_dir / operation.id / change.file_path
-                if backup_path.exists():
-                    try:
-                        shutil.copy2(backup_path, file_path)
-                        print(f"[BackupManager] Restored: {change.file_path}")
-                        success_count += 1
-                    except Exception as e:
-                        print(f"[BackupManager] Failed to restore {change.file_path}: {e}")
-                        fail_count += 1
-                else:
-                    print(f"[BackupManager] Backup not found: {change.file_path}")
+            print(f"[BackupManager] Processing: {change.file_path}")
+            print(f"[BackupManager]   Target: {file_path}")
+            print(f"[BackupManager]   Backup: {backup_file}")
+            
+            if backup_file.exists():
+                try:
+                    # 确保目标目录存在
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # 恢复文件
+                    shutil.copy2(backup_file, file_path)
+                    print(f"[BackupManager]   ✓ Restored: {change.file_path}")
+                    success_count += 1
+                except Exception as e:
+                    print(f"[BackupManager]   ✗ Failed to restore {change.file_path}: {e}")
                     fail_count += 1
+            else:
+                print(f"[BackupManager]   ✗ Backup not found: {backup_file}")
+                fail_count += 1
         
         # 标记操作为已撤销
         operation.metadata['undone'] = True
@@ -305,7 +374,7 @@ class BackupManager:
     
     def list_backups_with_info(self) -> List[Dict[str, Any]]:
         """
-        v1.3.1: 列出所有备份及其详细信息
+        v1.4.0: 列出所有备份及其详细信息
         
         Returns:
             List[Dict]: 备份信息列表
@@ -328,7 +397,7 @@ class BackupManager:
     
     def display_backup_list(self):
         """
-        v1.3.1: 显示备份列表（用于 CLI 展示）
+        v1.4.0: 显示备份列表（用于 CLI 展示）
         """
         backups = self.list_backups_with_info()
         
@@ -351,7 +420,7 @@ class BackupManager:
     
     def switch_to_backup(self, operation_id: str) -> bool:
         """
-        v1.3.1: 切换到指定备份（先备份当前状态，再恢复指定版本）
+        v1.4.0: 切换到指定备份（先备份当前状态，再恢复指定版本）
         
         Args:
             operation_id: 目标备份 ID
@@ -388,7 +457,7 @@ class BackupManager:
     
     def restore_backup(self, operation_id: str) -> bool:
         """
-        恢复到指定备份
+        恢复到指定备份 - v1.4.0 修复版
         
         Args:
             operation_id: 备份操作ID
@@ -396,6 +465,8 @@ class BackupManager:
         Returns:
             bool: 是否成功
         """
+        print(f"[BackupManager] Restoring to backup: {operation_id}")
+        
         operation = self.get_operation(operation_id)
         if not operation:
             print(f"[BackupManager] Operation not found: {operation_id}")
@@ -406,7 +477,6 @@ class BackupManager:
             print(f"[BackupManager] Backup directory not found: {operation_id}")
             return False
         
-        print(f"[BackupManager] Restoring to backup: {operation_id}")
         print(f"[BackupManager] Description: {operation.description}")
         
         success_count = 0
@@ -421,9 +491,13 @@ class BackupManager:
                     target_file.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(backup_file, target_file)
                     success_count += 1
+                    print(f"[BackupManager] Restored: {change.file_path}")
                 except Exception as e:
                     print(f"[BackupManager] Failed to restore {change.file_path}: {e}")
                     fail_count += 1
+            else:
+                print(f"[BackupManager] Backup file not found: {backup_file}")
+                fail_count += 1
         
         print(f"[BackupManager] Restore complete: {success_count} succeeded, {fail_count} failed")
         return fail_count == 0
@@ -440,27 +514,36 @@ class BackupManager:
         """
         operation = self.get_operation(operation_id)
         if not operation:
+            print(f"[BackupManager] Operation not found: {operation_id}")
             return False
         
         backup_subdir = self.backup_dir / operation_id
         if not backup_subdir.exists():
+            print(f"[BackupManager] Backup directory not found: {operation_id}")
             return False
         
+        all_valid = True
         for change in operation.changes:
             backup_file = backup_subdir / change.file_path
             if not backup_file.exists():
-                return False
+                print(f"[BackupManager] Missing file: {change.file_path}")
+                all_valid = False
+                continue
             
             # 验证哈希
             current_hash = self._compute_hash(backup_file)
             if current_hash != change.original_hash:
-                return False
+                print(f"[BackupManager] Hash mismatch: {change.file_path}")
+                all_valid = False
         
-        return True
+        if all_valid:
+            print(f"[BackupManager] Backup {operation_id} is valid")
+        
+        return all_valid
     
     def delete_backup(self, operation_id: str) -> bool:
         """
-        v1.3.1: 删除指定备份
+        v1.4.0: 删除指定备份
         
         Args:
             operation_id: 备份操作ID
@@ -478,6 +561,7 @@ class BackupManager:
         if backup_subdir.exists():
             try:
                 shutil.rmtree(backup_subdir)
+                print(f"[BackupManager] Deleted backup directory: {operation_id}")
             except Exception as e:
                 print(f"[BackupManager] Failed to delete backup directory: {e}")
                 return False
@@ -488,3 +572,15 @@ class BackupManager:
         
         print(f"[BackupManager] Deleted backup: {operation_id}")
         return True
+    
+    def get_latest_backup_id(self) -> Optional[str]:
+        """
+        v1.4.0: 获取最新的未撤销备份 ID
+        
+        Returns:
+            备份 ID 或 None
+        """
+        for op in reversed(self._operations):
+            if not op.metadata.get('undone', False):
+                return op.id
+        return None

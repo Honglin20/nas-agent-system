@@ -1,30 +1,37 @@
 """
 Level 4 靶机 - 高级模型（实际被实例化的模型）
-包含复杂的架构参数
+v1.4.0: 模型只接受 config 参数，通过 config.d_model 方式获取参数
 """
 import torch
 import torch.nn as nn
+from types import SimpleNamespace
 
 
 class TransformerModel(nn.Module):
     """
     Transformer 模型 - 实际被实例化的模型之一
-    包含复杂的架构参数
+    v1.4.0: 只接受 config 参数
     """
     
-    def __init__(self, input_dim=50, d_model=256, nhead=8, 
-                 num_encoder_layers=6, dim_feedforward=1024,
-                 dropout=0.1, num_classes=10, activation='gelu',
-                 norm_type='layernorm'):
+    def __init__(self, **config):
         super(TransformerModel, self).__init__()
         
-        self.d_model = d_model
+        # v1.4.0: 通过 config 字典获取参数
+        self.d_model = config.get('d_model', 256)
+        input_dim = config.get('input_dim', 50)
+        nhead = config.get('nhead', 8)
+        num_encoder_layers = config.get('num_encoder_layers', 6)
+        dim_feedforward = config.get('dim_feedforward', 1024)
+        dropout = config.get('dropout', 0.1)
+        num_classes = config.get('num_classes', 10)
+        activation = config.get('activation', 'gelu')
+        norm_type = config.get('norm_type', 'layernorm')
         
         # 输入投影
-        self.input_projection = nn.Linear(input_dim, d_model)
+        self.input_projection = nn.Linear(input_dim, self.d_model)
         
         # 位置编码
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        self.pos_encoder = PositionalEncoding(self.d_model, dropout)
         
         # 根据 activation 参数选择激活函数
         if activation == 'relu':
@@ -38,7 +45,7 @@ class TransformerModel(nn.Module):
         
         # Transformer 编码器
         encoder_layers = nn.TransformerEncoderLayer(
-            d_model=d_model,
+            d_model=self.d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
@@ -52,14 +59,14 @@ class TransformerModel(nn.Module):
         
         # 根据 norm_type 选择归一化层
         if norm_type == 'layernorm':
-            self.norm = nn.LayerNorm(d_model)
+            self.norm = nn.LayerNorm(self.d_model)
         elif norm_type == 'batchnorm':
-            self.norm = nn.BatchNorm1d(d_model)
+            self.norm = nn.BatchNorm1d(self.d_model)
         else:
             self.norm = nn.Identity()
         
         # 输出层
-        self.output = nn.Linear(d_model, num_classes)
+        self.output = nn.Linear(self.d_model, num_classes)
         
         self._init_weights()
     
@@ -109,12 +116,17 @@ class PositionalEncoding(nn.Module):
 class CNNModel(nn.Module):
     """
     CNN 模型 - 另一个可能被实例化的模型
-    不会被实际使用（根据配置）
+    v1.4.0: 只接受 config 参数
     """
     
-    def __init__(self, input_dim=50, num_channels=[64, 128, 256], 
-                 kernel_sizes=[3, 3, 3], dropout=0.3, num_classes=10):
+    def __init__(self, **config):
         super(CNNModel, self).__init__()
+        
+        input_dim = config.get('input_dim', 50)
+        num_channels = config.get('num_channels', [64, 128, 256])
+        kernel_sizes = config.get('kernel_sizes', [3, 3, 3])
+        dropout = config.get('dropout', 0.3)
+        num_classes = config.get('num_classes', 10)
         
         self.conv_layers = nn.ModuleList()
         

@@ -1,14 +1,11 @@
 """
-MAS Core - LLM Integration (v1.3.1 Enhanced)
-增强版 LLM 客户端，支持：
-- 智能模型识别（解析动态反射）
-- 代码片段分析
-- LLM 驱动的 report 插入
-- 寻优空间张开
-- 重试机制和超时控制
-- 响应缓存
-- 代理支持
-- 连接测试
+MAS Core - LLM Integration (v1.4.0 Fixed)
+修复版 LLM 客户端，改进：
+- 参数过滤：只推荐模型超参和结构参数
+- 不推荐的参数：lr、optimizer、num_classes、batch_size、epoch 等训练参数
+- 推荐的参数：d_model、num_layers、num_heads、dropout、dim_feedforward、activation、norm_type 等
+- 支持 YAML 配置文件分析
+- 智能模型修改范围限制
 """
 import os
 import re
@@ -26,6 +23,146 @@ from .exceptions import (
 )
 from .retry_cache import retry_with_backoff, RetryConfig, CircuitBreaker
 from .config import get_config
+
+
+# v1.4.0: 参数分类定义
+# 不推荐的参数（训练相关、任务相关）
+EXCLUDED_PARAM_NAMES = {
+    # 学习率相关
+    'lr', 'learning_rate', 'learning-rate', 'learningrate',
+    # 优化器相关
+    'optimizer', 'optim',
+    # 任务相关（固定）
+    'num_classes', 'num_classes', 'n_classes', 'nclasses', 'output_dim', 'output_dim',
+    'input_dim', 'input_dim', 'in_features', 'out_features',
+    # 批次相关
+    'batch_size', 'batchsize', 'batch-size',
+    # 训练轮数
+    'epoch', 'epochs', 'num_epochs', 'num_epochs', 'max_epochs',
+    # 其他训练参数
+    'weight_decay', 'weight_decay', 'momentum', 'beta1', 'beta2',
+    'warmup_steps', 'warmup_epochs', 'grad_clip', 'max_grad_norm',
+    # 数据相关
+    'num_samples', 'dataset_size', 'train_size', 'val_size', 'test_size',
+}
+
+EXCLUDED_PARAM_PATTERNS = [
+    r'.*lr$', r'.*learning[_-]?rate$',
+    r'.*optimizer.*',
+    r'.*batch[_-]?size$',
+    r'.*epoch.*',
+    r'.*num[_-]?classes$',
+    r'.*n[_-]?classes$',
+    r'.*weight[_-]?decay$',
+]
+
+# 推荐的参数（模型结构和超参）
+RECOMMENDED_PARAM_NAMES = {
+    # 模型维度
+    'd_model', 'dmodel', 'hidden_dim', 'hidden_dim', 'embed_dim', 'embedding_dim',
+    'hidden_size', 'hidden', 'dim', 'n_dim', 'feature_dim',
+    # 模型深度
+    'num_layers', 'num_layers', 'n_layers', 'nlayers', 'depth', 'n_layer',
+    'num_blocks', 'num_blocks', 'n_blocks',
+    # 注意力头
+    'num_heads', 'num_heads', 'n_heads', 'nheads', 'nhead', 'num_attention_heads',
+    # Dropout / 正则化
+    'dropout', 'dropout_rate', 'attention_dropout', 'attn_dropout',
+    'dropout_prob', 'p_dropout', 'hidden_dropout_prob',
+    # 前馈维度
+    'dim_feedforward', 'dim_feedforward', 'ffn_dim', 'ff_dim', 'intermediate_size',
+    'hidden_dim_ff', 'feedforward_dim',
+    # 激活函数
+    'activation', 'activation', 'act', 'hidden_act',
+    # 归一化
+    'norm_type', 'norm_type', 'norm', 'layer_norm_eps', 'normalization',
+    # 其他结构参数
+    'max_len', 'max_length', 'max_position_embeddings', 'seq_length',
+    'num_attention_heads', 'vocab_size', 'type_vocab_size',
+    'kernel_size', 'kernel_sizes', 'filter_size', 'num_filters',
+    'pool_size', 'stride', 'padding',
+}
+
+RECOMMENDED_PARAM_PATTERNS = [
+    r'.*d[_-]?model.*',
+    r'.*hidden[_-]?dim.*',
+    r'.*embed[_-]?dim.*',
+    r'.*num[_-]?layers.*',
+    r'.*n[_-]?layers.*',
+    r'.*num[_-]?heads.*',
+    r'.*n[_-]?heads.*',
+    r'.*dropout.*',
+    r'.*feedforward.*',
+    r'.*ffn[_-]?dim.*',
+    r'.*activation.*',
+    r'.*norm[_-]?type.*',
+]
+
+
+def is_excluded_param(param_name: str) -> bool:
+    """检查参数是否应该被排除（不推荐寻优）"""
+    param_lower = param_name.lower().strip()
+    
+    # 直接匹配排除列表
+    if param_lower in EXCLUDED_PARAM_NAMES:
+        return True
+    
+    # 正则匹配排除模式
+    for pattern in EXCLUDED_PARAM_PATTERNS:
+        if re.match(pattern, param_lower, re.IGNORECASE):
+            return True
+    
+    return False
+
+
+def is_recommended_param(param_name: str) -> bool:
+    """检查参数是否是推荐的模型结构参数"""
+    param_lower = param_name.lower().strip()
+    
+    # 直接匹配推荐列表
+    if param_lower in RECOMMENDED_PARAM_NAMES:
+        return True
+    
+    # 正则匹配推荐模式
+    for pattern in RECOMMENDED_PARAM_PATTERNS:
+        if re.match(pattern, param_lower, re.IGNORECASE):
+            return True
+    
+    return False
+
+
+def filter_nas_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    v1.4.0: 过滤 NAS 候选参数，只保留模型结构参数
+    
+    Args:
+        candidates: 原始候选参数列表
+        
+    Returns:
+        过滤后的候选参数列表
+    """
+    filtered = []
+    
+    for cand in candidates:
+        param_name = cand.get('name', '')
+        
+        # 首先检查是否在排除列表中
+        if is_excluded_param(param_name):
+            print(f"[LLMClient] Excluding training/task parameter: {param_name}")
+            continue
+        
+        # 检查是否是推荐的模型参数
+        if is_recommended_param(param_name):
+            filtered.append(cand)
+            print(f"[LLMClient] Including model parameter: {param_name}")
+        else:
+            # 对于不在明确列表中的参数，保留但标记为待定
+            # 让 LLM 进一步判断
+            cand['_pending_review'] = True
+            filtered.append(cand)
+            print(f"[LLMClient] Pending review for parameter: {param_name}")
+    
+    return filtered
 
 
 class BaseLLMClient(ABC):
@@ -50,12 +187,10 @@ class BaseLLMClient(ABC):
 
 class LLMClient(BaseLLMClient):
     """
-    增强版 LLM 客户端 - v1.3.1
-    - 支持重试机制和超时控制
-    - 支持熔断器模式
-    - 更好的错误处理
-    - 代理支持
-    - 连接测试
+    修复版 LLM 客户端 - v1.4.0
+    - 参数过滤：只推荐模型超参和结构参数
+    - 支持 YAML 配置文件分析
+    - 智能模型修改范围限制
     """
     
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
@@ -64,7 +199,7 @@ class LLMClient(BaseLLMClient):
         self.api_key = api_key or config.llm.api_key or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or config.llm.base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         
-        # v1.3.1: 检查 API key 和 URL
+        # v1.4.0: 检查 API key 和 URL
         if not self.api_key:
             raise LLMError(
                 ErrorCode.LLM_NOT_INITIALIZED,
@@ -91,11 +226,11 @@ class LLMClient(BaseLLMClient):
         self.models = config.llm.models
         self.current_model = None
         
-        # v1.3.1: 从环境变量获取代理设置
+        # v1.4.0: 从环境变量获取代理设置
         self.http_proxy = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
         self.https_proxy = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
         
-        # v1.3.1: 初始化 OpenAI 客户端，支持代理和禁用 SSL 验证
+        # v1.4.0: 初始化 OpenAI 客户端，支持代理和禁用 SSL 验证
         http_client = None
         if self.http_proxy or self.https_proxy:
             proxies = {}
@@ -127,11 +262,11 @@ class LLMClient(BaseLLMClient):
             recovery_timeout=60.0
         )
         
-        # v1.3.1: 测试连接
+        # v1.4.0: 测试连接
         self._test_connection()
     
     def _test_connection(self):
-        """v1.3.1: 测试 LLM 连接是否可用"""
+        """v1.4.0: 测试 LLM 连接是否可用"""
         try:
             # 发送一个简单的测试请求
             response = self.client.chat.completions.create(
@@ -206,7 +341,7 @@ class LLMClient(BaseLLMClient):
                 except openai.APITimeoutError as e:
                     last_error = e
                     print(f"[LLMClient] Timeout with model {model}: {e}")
-                    # v1.3.1: 超时错误提示代理配置
+                    # v1.4.0: 超时错误提示代理配置
                     if attempt == self.max_retries and not self.http_proxy and not self.https_proxy:
                         print(f"[LLMClient] 提示: 如果连接持续超时，请尝试配置代理:")
                         print(f"  export http_proxy=http://127.0.0.1:7890")
@@ -269,13 +404,16 @@ class LLMClient(BaseLLMClient):
         return None
     
     def analyze_code_for_nas(self, code: str, file_path: str = "") -> List[Dict[str, Any]]:
-        """使用真实 LLM 分析代码，识别 NAS 候选参数"""
+        """
+        v1.4.0: 使用真实 LLM 分析代码，识别 NAS 候选参数
+        只推荐模型超参和结构参数，过滤掉训练参数
+        """
         # 检查代码长度
         if len(code) > 50000:  # 约 50KB
             print(f"[LLMClient] Warning: File {file_path} is too large, truncating...")
             code = code[:50000] + "\n# ... (truncated)"
         
-        prompt = f"""你是一个神经网络架构搜索（NAS）专家。请分析以下 Python 代码，识别所有可以寻优的参数。
+        prompt = f"""你是一个神经网络架构搜索（NAS）专家。请分析以下 Python 代码，识别所有可以寻优的**模型结构参数**。
 
 文件路径: {file_path}
 
@@ -284,9 +422,23 @@ class LLMClient(BaseLLMClient):
 {code}
 ```
 
-请仔细分析代码，识别以下类型的参数：
-1. 数值参数（如学习率、维度、层数、批次大小、dropout率等）
-2. 层选择（如激活函数、优化器、归一化层等）
+请仔细分析代码，只识别以下类型的**模型结构参数**：
+1. 模型维度参数（如 d_model、hidden_dim、embed_dim、dim_feedforward 等）
+2. 模型深度参数（如 num_layers、n_layers、depth、num_blocks 等）
+3. 注意力头数（如 num_heads、n_heads、nhead 等）
+4. Dropout 率（如 dropout、attention_dropout 等正则化参数）
+5. 激活函数选择（如 activation、hidden_act 等）
+6. 归一化类型（如 norm_type、normalization 等）
+7. 其他架构参数（如 kernel_size、max_len 等）
+
+**重要：不要推荐以下训练相关参数：**
+- learning_rate / lr（学习率）
+- optimizer（优化器）
+- batch_size（批次大小）
+- num_epochs / epochs（训练轮数）
+- weight_decay（权重衰减）
+- momentum、beta1、beta2（优化器参数）
+- num_classes / num_classes（类别数，任务相关）
 
 对于每个参数，请提供:
 - name: 参数名
@@ -295,28 +447,150 @@ class LLMClient(BaseLLMClient):
 - suggested_space: 建议的搜索空间（用Python表达式表示）
 - reason: 为什么这个参数值得寻优
 - line: 大概的行号（如果能在代码中定位）
+- is_backbone_param: true/false（是否是 backbone 主模型的参数）
 
 必须以 JSON 格式返回，格式如下:
-{{"candidates": [{{"name": "learning_rate", "type": "value", "current_value": "0.001", "suggested_space": "ValueSpace([1e-4, 1e-3, 1e-2])", "reason": "学习率对模型收敛至关重要", "line": 15}}]}}
+{{"candidates": [{{"name": "d_model", "type": "value", "current_value": "256", "suggested_space": "ValueSpace([128, 256, 512])", "reason": "模型维度影响表达能力", "line": 15, "is_backbone_param": true}}]}}
 
 重要：返回的 JSON 必须在一行内，不要格式化换行。"""
         
         try:
             content = self._call_llm(
                 prompt,
-                "你是一个专业的神经网络架构搜索（NAS）专家，擅长识别深度学习代码中的可寻优参数。"
+                "你是一个专业的神经网络架构搜索（NAS）专家，擅长识别深度学习代码中的可寻优模型结构参数。"
             )
             
             result = self._extract_json(content)
             if result and "candidates" in result:
-                return result["candidates"]
-            if isinstance(result, list):
-                return result
-            return []
+                candidates = result["candidates"]
+            elif isinstance(result, list):
+                candidates = result
+            else:
+                candidates = []
+            
+            # v1.4.0: 应用参数过滤
+            print(f"[LLMClient] LLM returned {len(candidates)} candidates, applying filter...")
+            filtered_candidates = filter_nas_candidates(candidates)
+            print(f"[LLMClient] After filtering: {len(filtered_candidates)} candidates")
+            
+            return filtered_candidates
         
         except LLMError as e:
             print(f"[LLMClient] Error analyzing code: {e}")
             return []
+    
+    def analyze_yaml_config_for_nas(self, yaml_content: str, file_path: str = "") -> List[Dict[str, Any]]:
+        """
+        v1.4.0: 分析 YAML 配置文件，识别可寻优参数
+        
+        Args:
+            yaml_content: YAML 文件内容
+            file_path: 文件路径
+            
+        Returns:
+            候选参数列表
+        """
+        prompt = f"""你是一个神经网络架构搜索（NAS）专家。请分析以下 YAML 配置文件，识别所有可以寻优的**模型结构参数**。
+
+文件路径: {file_path}
+
+YAML 内容:
+```yaml
+{yaml_content}
+```
+
+请提取所有模型结构参数及其当前值，并推荐搜索空间。
+
+**只关注模型结构参数，不要推荐训练参数（如 lr、batch_size、epochs、optimizer 等）。**
+
+推荐的参数类型：
+- 模型维度：d_model、hidden_dim、embed_dim、dim_feedforward 等
+- 模型深度：num_layers、n_layers、depth 等
+- 注意力头数：num_heads、n_heads 等
+- Dropout：dropout、attention_dropout 等
+- 激活函数：activation 等
+- 归一化：norm_type 等
+
+对于每个参数，请提供:
+- name: 参数名（完整路径，如 model.d_model）
+- type: "value" 或 "layer"
+- current_value: 当前值
+- suggested_space: 建议搜索空间
+- reason: 推荐理由
+- yaml_path: YAML 中的路径（如 ['model', 'd_model']）
+
+以 JSON 格式返回: {{"candidates": [...]}}"""
+
+        try:
+            content = self._call_llm(
+                prompt,
+                "你是一个专业的 NAS 专家，擅长分析配置文件中的模型结构参数。"
+            )
+            
+            result = self._extract_json(content)
+            if result and "candidates" in result:
+                candidates = result["candidates"]
+            elif isinstance(result, list):
+                candidates = result
+            else:
+                candidates = []
+            
+            # 应用参数过滤
+            filtered_candidates = filter_nas_candidates(candidates)
+            return filtered_candidates
+            
+        except LLMError as e:
+            print(f"[LLMClient] Error analyzing YAML config: {e}")
+            return []
+    
+    def identify_backbone_init_params(self, code: str, model_class_name: str) -> Dict[str, Any]:
+        """
+        v1.4.0: 识别 backbone 主模型 __init__ 方法的参数
+        
+        Args:
+            code: 模型类代码
+            model_class_name: 模型类名
+            
+        Returns:
+            参数信息字典
+        """
+        prompt = f"""你是一个 Python 代码分析专家。请分析以下模型类代码，识别 backbone 主模型的 __init__ 方法参数。
+
+模型类名: {model_class_name}
+
+代码:
+```python
+{code}
+```
+
+请分析:
+1. __init__ 方法有哪些参数？
+2. 每个参数的当前默认值是什么？
+3. 哪些参数是模型结构参数（值得 NAS 寻优）？
+4. 哪些参数是训练参数（不应该寻优）？
+
+以 JSON 格式返回:
+{{
+    "init_params": [
+        {{"name": "d_model", "default_value": "256", "is_structure_param": true, "is_training_param": false}}
+    ],
+    "backbone_class": "类名",
+    "line_start": 10,
+    "line_end": 50
+}}"""
+
+        try:
+            content = self._call_llm(
+                prompt,
+                "你是一个 Python 代码分析专家，擅长分析深度学习模型类的结构。"
+            )
+            
+            result = self._extract_json(content)
+            return result or {}
+            
+        except LLMError as e:
+            print(f"[LLMClient] Error identifying backbone params: {e}")
+            return {}
     
     def analyze_code_snippet_for_model_instantiation(self, code_snippet: str, 
                                                       available_models: List[str]) -> Dict[str, Any]:
@@ -507,6 +781,12 @@ class LLMClient(BaseLLMClient):
     
     def recommend_injection(self, candidates: List[Dict]) -> List[Dict]:
         """使用真实 LLM 推荐哪些参数值得注入"""
+        # v1.4.0: 先过滤掉训练参数
+        candidates = filter_nas_candidates(candidates)
+        
+        if not candidates:
+            return []
+        
         candidates_str = json.dumps(candidates, indent=2, ensure_ascii=False)
         
         prompt = f"""你是一个 NAS 专家。请分析以下候选参数，推荐哪些最值得进行 NAS 寻优。
@@ -517,6 +797,9 @@ class LLMClient(BaseLLMClient):
 请对每个参数给出:
 - recommended: true/false（是否推荐寻优）
 - priority: "high"/"medium"/"low"（优先级）
+
+**重要：只推荐模型结构参数（如 d_model、num_layers、num_heads、dropout、activation 等）。**
+**不要推荐训练参数（如 lr、batch_size、epochs、optimizer 等）。**
 
 返回 JSON 格式:
 {{
@@ -556,9 +839,9 @@ def init_llm(api_key: str = None, base_url: str = None, use_mock: bool = False):
     """初始化 LLM 客户端"""
     global _llm_client
     
-    # v1.3.1: 移除 Mock 支持，强制使用真实 LLM
+    # v1.4.0: 移除 Mock 支持，强制使用真实 LLM
     if use_mock:
-        print("[LLMClient] 警告: Mock 模式已在 v1.3.1 中移除，将使用真实 LLM")
+        print("[LLMClient] 警告: Mock 模式已在 v1.4.0 中移除，将使用真实 LLM")
     
     _llm_client = LLMClient(api_key=api_key, base_url=base_url)
 

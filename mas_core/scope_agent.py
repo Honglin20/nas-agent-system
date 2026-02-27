@@ -1,18 +1,20 @@
 """
-MAS Core - Scope Agent (Real LLM Only)
+MAS Core - Scope Agent (v1.4.0 Fixed)
 作用域智能体：所有分析通过真实 LLM 完成，严禁规则模拟
+- 参数过滤：只推荐模型超参和结构参数
 """
 import ast
 from typing import Dict, Any, List, Optional
 import libcst as cst
 
 from .base_agent import BaseAgent
-from .llm_client import get_llm_client
+from .llm_client import get_llm_client, filter_nas_candidates
 
 
 class ScopeAgent(BaseAgent):
     """
-    作用域智能体 - 使用真实 LLM 分析代码
+    作用域智能体 - v1.4.0
+    使用真实 LLM 分析代码，只推荐模型结构参数
     """
     
     def __init__(self, file_path: str, scope_name: str = "global"):
@@ -44,7 +46,7 @@ class ScopeAgent(BaseAgent):
     
     def analyze(self) -> Dict[str, Any]:
         """
-        使用真实 LLM 分析代码
+        v1.4.0: 使用真实 LLM 分析代码，过滤训练参数
         """
         if self.cst_tree is None:
             self.load_file()
@@ -55,7 +57,8 @@ class ScopeAgent(BaseAgent):
         llm = get_llm_client()
         candidates = llm.analyze_code_for_nas(self.source_code, self.file_path)
         
-        self._nas_candidates = candidates
+        # v1.4.0: 再次应用参数过滤（双重保险）
+        self._nas_candidates = filter_nas_candidates(candidates)
         
         # 基础 AST 分析（仅用于展示，不参与 NAS 决策）
         ast_tree = ast.parse(self.source_code)
@@ -72,12 +75,13 @@ class ScopeAgent(BaseAgent):
             'file_path': self.file_path,
             'classes': classes,
             'functions': functions,
-            'nas_candidates': candidates,
+            'nas_candidates': self._nas_candidates,
             'llm_analyzed': True
         }
         
-        self._think(f"LLM analysis complete: {len(candidates)} NAS candidates")
-        for cand in candidates[:3]:
+        self._think(f"LLM analysis complete: {len(candidates)} raw candidates")
+        self._think(f"After filtering: {len(self._nas_candidates)} model structure candidates")
+        for cand in self._nas_candidates[:3]:
             self._think(f"  - {cand.get('name')}: {cand.get('current_value')}")
         
         return result

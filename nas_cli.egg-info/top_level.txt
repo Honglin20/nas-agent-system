@@ -1,0 +1,3 @@
+mas_core
+nas_cli
+tests

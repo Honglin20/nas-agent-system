@@ -1,0 +1,26 @@
+# Level 3 靶机配置文件
+# 完全控制模型架构和训练流程
+
+model:
+  model_name: "DynamicModel"  # 可选: DynamicModel, ResidualModel
+  model_kwargs:
+    input_dim: 20
+    hidden_dims: [128, 64, 32]  # 多层隐藏层
+    output_dim: 5
+    activation: "ReLU"  # 可选: ReLU, Sigmoid, Tanh, GELU
+    dropout_rate: 0.3
+    use_batchnorm: true
+
+training:
+  optimizer_name: "Adam"  # 可选: Adam, SGD
+  lr: 0.001
+  weight_decay: 1e-4
+  momentum: 0.9  # 仅用于 SGD
+  num_epochs: 30
+  batch_size: 128
+  loss: "CrossEntropyLoss"  # 可选: CrossEntropyLoss, MSELoss
+
+data:
+  num_samples: 5000
+  input_dim: 20
+  num_classes: 5

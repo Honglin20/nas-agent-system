@@ -1,0 +1,2 @@
+[console_scripts]
+nas-cli = nas_cli.main:main
